@@ -1,0 +1,206 @@
+// Connect to MongoDB (make sure your MongoDB server is running)
+// You might need to adjust the connection string if you're not using the default.
+// This script assumes you're using the `mongosh` shell.
+
+// Use the 'MusicServer' database.  It will be created if it doesn't exist.
+use MusicServer;
+
+// --- Create collections and insert sample data ---
+
+// 1. MusicGenres
+db.musicgenres.insertOne({ musicgenre_name: "Pop" });
+const popGenreId = db.musicgenres.findOne({ musicgenre_name: "Pop" })._id;
+
+db.musicgenres.insertOne({ musicgenre_name: "Rock" });
+const rockGenreId = db.musicgenres.findOne({ musicgenre_name: "Rock" })._id;
+
+db.musicgenres.insertOne({ musicgenre_name: "Hip Hop" });
+const hipHopGenreId = db.musicgenres.findOne({ musicgenre_name: "Hip Hop" })._id;
+
+db.musicgenres.insertOne({ musicgenre_name: "Electronic" });
+const electronicGenreId = db.musicgenres.findOne({musicgenre_name: "Electronic"})._id;
+
+
+// 2. Users
+db.users.insertOne({
+  username: "john_doe",
+  email: "john.doe@example.com",
+  password: "hashed_password_here", //  Replace with a hashed password!
+  profile_picture: "/images/john_doe.jpg",
+  date_of_birth: new Date("1990-05-15"),
+  favourite_songs: []
+});
+const johnDoeId = db.users.findOne({ username: "john_doe" })._id;
+
+
+// 3. Admin
+db.admin.insertOne({
+  user_id: johnDoeId, // Reference the user
+  username: "admin_user",
+  password: "hashed_admin_password" // Replace with a hashed password!
+});
+
+
+// 4. Artists
+db.artists.insertOne({
+  artist_name: "Example Artist",
+  date_of_birth: new Date("1985-10-20"),
+  national: "USA",
+  description: "A popular artist.",
+  artist_avatar: "/images/example_artist.jpg",
+  social_media: "twitter.com/exampleartist",
+  number_of_songs: 10,
+  number_of_plays: 100000,
+  number_of_likes: 5000,
+  musicgenre_ids: [popGenreId, rockGenreId]
+});
+const exampleArtistId = db.artists.findOne({ artist_name: "Example Artist" })._id;
+
+db.artists.insertOne({
+    artist_name: "Another Artist",
+    date_of_birth: new Date("1992-03-10"),
+    national: "UK",
+    description: "An up-and-coming artist.",
+    artist_avatar: "/images/another_artist.jpg",
+    social_media: "instagram.com/anotherartist",
+    number_of_songs: 5,
+    number_of_plays: 50000,
+    number_of_likes: 2000,
+    musicgenre_ids: [hipHopGenreId, electronicGenreId]
+  });
+const anotherArtistId = db.artists.findOne({ artist_name: "Another Artist" })._id;
+
+
+// 5. Albums
+db.albums.insertOne({
+  artist_id: exampleArtistId, // Reference the artist
+  album_name: "Debut Album",
+  release_time: new Date("2023-01-15"),
+  image: "/images/debut_album.jpg",
+  description: "The first album by Example Artist.",
+  number_of_songs: 10,
+  number_of_plays: 80000,
+  number_of_likes: 4000
+});
+const debutAlbumId = db.albums.findOne({ album_name: "Debut Album" })._id;
+
+db.albums.insertOne({
+    artist_id: anotherArtistId,
+    album_name: "Second Album",
+    release_time: new Date("2024-05-20"),
+    image: "/images/second_album.jpg",
+    description: "The second album by Another Artist.",
+    number_of_songs: 8,
+    number_of_plays: 60000,
+    number_of_likes: 3000
+  });
+const secondAlbumId = db.albums.findOne({ album_name: "Second Album" })._id;
+
+// 6. Songs
+db.songs.insertOne({
+  artist_ids: [exampleArtistId],
+  musicgenre_ids: [popGenreId],
+  album_id: debutAlbumId,
+  song_name: "Example Song",
+  description: "A catchy pop song.",
+  lyrics: "These are the lyrics...",
+  release_time: new Date("2023-01-01"),
+  duration_song: 240, // 4 minutes (in seconds)
+  number_of_plays: 50000,
+  number_of_likes: 2500,
+  file_up: "/audio/example_song.mp3", // Replace with the actual file path or URL
+  status: "published"
+});
+const exampleSongId = db.songs.findOne({ song_name: "Example Song" })._id;
+
+db.songs.insertOne({
+    artist_ids: [anotherArtistId],
+    musicgenre_ids: [hipHopGenreId],
+    album_id: secondAlbumId,
+    song_name: "Another Song",
+    description: "A cool hip-hop track.",
+    lyrics: "These are the hip-hop lyrics...",
+    release_time: new Date("2024-05-10"),
+    duration_song: 180, // 3 minutes (in seconds)
+    number_of_plays: 30000,
+    number_of_likes: 1500,
+    file_up: "/audio/another_song.mp3",
+    status: "published"
+  });
+  const anotherSongId = db.songs.findOne({ song_name: "Another Song" })._id;
+
+//Add song to favourites
+db.users.updateOne(
+  { _id: johnDoeId },
+  { $push: { favourite_songs: exampleSongId } }
+);
+
+// 7. Playlists
+db.playlists.insertOne({
+  user_id: johnDoeId,
+  playlist_name: "My Favorite Songs",
+  description: "A collection of my all-time favorite tracks.",
+  number_of_songs: 1, // We'll update this as we add songs
+  creation_day: new Date(),
+  is_public: true,
+  songs: [
+    {
+      song_id: exampleSongId,
+      date: new Date()
+    }
+  ]
+});
+const playlistId = db.playlists.findOne({ playlist_name: "My Favorite Songs"})._id;
+
+db.playlists.updateOne(
+    {_id: playlistId},
+    {
+        $push: {songs: {song_id: anotherSongId, date: new Date()}},
+        $inc: {number_of_songs: 1}
+    }
+)
+
+// --- Optional: Create indexes for better performance ---
+
+db.users.createIndex({ username: 1 }, { unique: true });
+db.users.createIndex({ email: 1 }, { unique: true });
+db.artists.createIndex({ artist_name: 1 });
+db.songs.createIndex({ artist_ids: 1 });
+db.songs.createIndex({ album_id: 1 });
+db.songs.createIndex({ song_name: 1});
+db.albums.createIndex({ artist_id: 1 });
+db.albums.createIndex({album_name: 1});
+db.playlists.createIndex({ user_id: 1});
+db.musicgenres.createIndex({musicgenre_name: 1});
+
+// --- Display the data (optional, for verification) ---
+
+print("Sample Data Inserted:");
+// print("Users:");
+// printjson(db.users.find().toArray());  //Print all is not good for readability
+printjson(db.users.findOne());
+
+// print("\nAdmin:");
+// printjson(db.admin.find().toArray());
+printjson(db.admin.findOne());
+
+// print("\nArtists:");
+// printjson(db.artists.find().toArray());
+printjson(db.artists.findOne());
+
+// print("\nMusic Genres:");
+// printjson(db.musicgenres.find().toArray());
+printjson(db.musicgenres.findOne());
+
+
+// print("\nSongs:");
+// printjson(db.songs.find().toArray());
+printjson(db.songs.findOne());
+
+// print("\nAlbums:");
+// printjson(db.albums.find().toArray());
+printjson(db.albums.findOne());
+
+// print("\nPlaylists");
+// printjson(db.playlists.find().toArray());
+printjson(db.playlists.findOne());
