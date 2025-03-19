@@ -22,7 +22,7 @@ class UserSerializer(serializers.Serializer):
     email = serializers.EmailField(max_length=100)
     password = serializers.CharField(max_length=255, write_only=True)  # Important: write_only prevents the password from being sent in responses
     profile_picture = serializers.CharField(max_length=255, required=False)
-    date_of_birth = serializers.DateField(required=False)
+    date_of_birth = serializers.DateTimeField(required=False)
     favourite_songs = serializers.ListField(child=ObjectIdField(), required=False)
 
 class AdminSerializer(serializers.Serializer):
@@ -34,7 +34,7 @@ class AdminSerializer(serializers.Serializer):
 class ArtistSerializer(serializers.Serializer):
     _id = ObjectIdField(read_only=True)
     artist_name = serializers.CharField(max_length=50)
-    date_of_birth = serializers.DateField(required=False)
+    date_of_birth = serializers.DateTimeField(required=False)
     national = serializers.CharField(max_length=50, required=False)
     description = serializers.CharField(required=False)
     artist_avatar = serializers.CharField(max_length=255, required=False)
@@ -48,7 +48,7 @@ class AlbumSerializer(serializers.Serializer):
     _id = ObjectIdField(read_only=True)
     artist_id = ObjectIdField()
     album_name = serializers.CharField(max_length=50)
-    release_time = serializers.DateField(required=False)
+    release_time = serializers.DateTimeField(required=False)
     image = serializers.CharField(max_length=255, required=False)
     description = serializers.CharField(required=False)
     number_of_songs = serializers.IntegerField(required=False)
@@ -63,7 +63,7 @@ class SongSerializer(serializers.Serializer):
     song_name = serializers.CharField(max_length=255)
     description = serializers.CharField(required=False)
     lyrics = serializers.CharField(required=False)
-    release_time = serializers.DateField(required=False)
+    release_time = serializers.DateTimeField(required=False)
     duration_song = serializers.IntegerField(required=False)
     number_of_plays = serializers.IntegerField(required=False)
     number_of_likes = serializers.IntegerField(required=False)
@@ -76,6 +76,6 @@ class PlaylistSerializer(serializers.Serializer):
     playlist_name = serializers.CharField(max_length = 255)
     description = serializers.CharField(required = False)
     number_of_songs = serializers.IntegerField(read_only = True, required = False)
-    creation_day = serializers.DateField(required = False)
+    creation_day = serializers.DateTimeField(required = False)
     is_public = serializers.BooleanField(required = False)
     songs = serializers.ListField(child = serializers.DictField(), required = False) #List of dictionaries

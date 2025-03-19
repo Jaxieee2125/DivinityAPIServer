@@ -1,0 +1,31 @@
+# General
+.idea/
+__pycache__/
+*.pyc
+*.log
+*.swp
+*~
+.DS_Store
+
+# Virtual environment
+venv/
+env/
+.env
+
+# Database files (if using SQLite)
+db.sqlite3
+db.sqlite3-journal
+
+# Media files (if you have user uploads)
+media/
+
+# Static files (collected static files)
+static/
+
+# Secret Key and other sensitive information
+# Put your actual secret key and database credentials in a .env file
+# and load them using a library like python-dotenv.
+# NEVER commit your actual secrets to Git!
+# Add your .env to the .gitignore file.
+# settings.py # DO NOT IGNORE settings.py, but remove sensitive info!
+secret.py #Example for storing secrets
