@@ -2,7 +2,7 @@
 // You might need to adjust the connection string if you're not using the default.
 // This script assumes you're using the `mongosh` shell.
 
-// Use the 'MusicServer' database.  It will be created if it doesn't exist.
+// Use the 'MusicDatabase' database.  It will be created if it doesn't exist.
 use MusicServer;
 
 // --- Create collections and insert sample data ---
