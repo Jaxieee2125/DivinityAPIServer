@@ -223,38 +223,71 @@ class AlbumDetail(APIView):
     
 class SongList(APIView):
     def get(self, request):
-        songs = list(db.songs.find())
-        serializer = SongSerializer(songs, many=True)
-        return Response(serializer.data)
+        try:
+            songs = list(db.songs.find())
+            serializer = SongSerializer(songs, many=True, context={'request': request}) # Thêm context
+            return Response(serializer.data)
+        except Exception as e:
+            return Response({"error": "Could not retrieve songs"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
     def post(self, request):
-        serializer = SongSerializer(data = request.data)
+        serializer = SongSerializer(data=request.data, context={'request': request}) # Thêm context
         if serializer.is_valid():
-            result = db.songs.insert_one(serializer.validated_data)
-            created_song = get_object(db.songs, result.inserted_id)
-            return Response(SongSerializer(created_song).data, status=status.HTTP_201_CREATED)
+            try:
+                song_data_to_insert = serializer.validated_data
+                # Xử lý lưu file_up nếu có upload thực tế
+                result = db.songs.insert_one(song_data_to_insert)
+                created_song = db.songs.find_one({'_id': result.inserted_id})
+                if created_song:
+                    response_serializer = SongSerializer(created_song, context={'request': request}) # Thêm context
+                    return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+                else:
+                     return Response({"error": "Could not retrieve created song"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception as e:
+                 return Response({"error": "Could not create song"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
 class SongDetail(APIView):
     def get(self, request, pk):
         song = get_object(db.songs, pk)
         if song:
-            serializer = SongSerializer(song)
+            serializer = SongSerializer(song, context={'request': request}) # Thêm context
             return Response(serializer.data)
-        return Response(status = status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
     def put(self, request, pk):
         song = get_object(db.songs, pk)
         if song:
-            serializer = SongSerializer(song, data=request.data)
+            serializer = SongSerializer(song, data=request.data, partial=True, context={'request': request}) # Thêm context
             if serializer.is_valid():
-                db.songs.update_one({'_id': ObjectId(pk)}, {'$set': serializer.validated_data})
-                updated_song = get_object(db.songs, pk)
-                return Response(SongSerializer(updated_song).data)
-            return Response(serializer.errors, status = status.HTTP_400_BAD_REQUEST)
-        return Response(status = status.HTTP_404_NOT_FOUND)
+                try:
+                    update_data = serializer.validated_data
+                    # Xử lý lưu file_up mới nếu có upload thực tế
+                    db.songs.update_one({'_id': ObjectId(pk)}, {'$set': update_data})
+                    updated_song = get_object(db.songs, pk)
+                    if updated_song:
+                        response_serializer = SongSerializer(updated_song, context={'request': request}) # Thêm context
+                        return Response(response_serializer.data)
+                    else:
+                        return Response(status=status.HTTP_404_NOT_FOUND)
+                except Exception as e:
+                     return Response({"error": f"Could not update song {pk}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
     def delete(self, request, pk):
         song = get_object(db.songs, pk)
         if song:
-            db.songs.delete_one({'_id':ObjectId(pk)})
-            return Response(status=status.HTTP_204_NO_CONTENT)
+            try:
+                # Xử lý xóa file media nếu cần
+                result = db.songs.delete_one({'_id': ObjectId(pk)})
+                if result.deleted_count == 1:
+                    return Response(status=status.HTTP_204_NO_CONTENT)
+                else:
+                     return Response({"error": f"Could not delete song {pk}, delete count 0"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception as e:
+                 return Response({"error": f"Could not delete song {pk}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(status=status.HTTP_404_NOT_FOUND)
     
 class PlaylistList(APIView):
