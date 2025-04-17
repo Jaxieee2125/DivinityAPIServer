@@ -16,7 +16,7 @@ from django.contrib.auth.hashers import make_password, check_password # Import �
 # --- MongoDB Connection (Giả sử cấu hình ở đây hoặc import từ nơi khác) ---
 try:
     # Thay thế bằng connection string của bạn nếu cần
-    client = MongoClient(settings.MONGO_DB_URI if hasattr(settings, 'MONGO_DB_URI') else 'mongodb://localhost:27017/')
+    client = MongoClient(settings.MONGO_DB_URL if hasattr(settings, 'MONGO_DB_URL') else 'mongodb://localhost:27017/')
     # Thay thế 'MusicServer' bằng tên database của bạn
     db = client[settings.MONGO_DB_NAME if hasattr(settings, 'MONGO_DB_NAME') else 'MusicDatabase']
     # Kiểm tra kết nối (tùy chọn)
@@ -484,8 +484,52 @@ class PlaylistDetail(APIView):
             return Response(status=status.HTTP_204_NO_CONTENT)
         return Response(status=status.HTTP_404_NOT_FOUND)
 
-    # TODO: Cân nhắc thêm các @action nếu dùng ViewSet cho Playlist để thêm/xóa bài hát
-    # @action(detail=True, methods=['post'])
-    # def add_song(self, request, pk=None): ...
-    # @action(detail=True, methods=['post'])
-    # def remove_song(self, request, pk=None): ...
+class SearchView(APIView):
+    def get(self, request):
+        query = request.GET.get('q', '').strip()
+        limit = 5 # Giới hạn số lượng kết quả mỗi loại
+
+        if not query:
+            return Response({"albums": [], "tracks": [], "artists": []})
+
+        # TODO: Sử dụng $text search hoặc $regex hiệu quả hơn
+        # Ví dụ đơn giản với $regex (không phân biệt hoa thường)
+        regex_query = {'$regex': query, '$options': 'i'}
+
+        try:
+            # Tìm albums
+            albums_cursor = db.albums.find({'album_name': regex_query}).limit(limit)
+            albums_list = []
+            for album in albums_cursor:
+                # Lấy artist lồng vào (cần tối ưu bằng $lookup)
+                artist_info = get_object(db.artists, str(album.get('artist_id')))
+                album['artist'] = artist_info
+                albums_list.append(album)
+            album_serializer = AlbumSerializer(albums_list, many=True, context={'request': request})
+
+            # Tìm tracks
+            tracks_cursor = db.songs.find({'song_name': regex_query}).limit(limit)
+            tracks_list = []
+            for track in tracks_cursor:
+                 # Lấy artist/album lồng vào (cần tối ưu bằng $lookup)
+                 artist_ids = track.get('artist_ids', [])
+                 track['artists'] = [get_object(db.artists, str(aid)) for aid in artist_ids if aid]
+                 album_id = track.get('album_id')
+                 track['album'] = get_object(db.albums, str(album_id)) if album_id else None
+                 tracks_list.append(track)
+            # Có thể tạo SongBasicSerializer hoặc dùng SongSerializer đầy đủ
+            track_serializer = SongSerializer(tracks_list, many=True, context={'request': request})
+
+
+            # Tìm artists
+            artists_cursor = db.artists.find({'artist_name': regex_query}).limit(limit)
+            artist_serializer = ArtistSerializer(list(artists_cursor), many=True, context={'request': request})
+
+            return Response({
+                "albums": album_serializer.data,
+                "tracks": track_serializer.data,
+                "artists": artist_serializer.data
+            })
+        except Exception as e:
+             print(f"Search error: {e}")
+             return Response({"error": "Search failed"}, status=500)

@@ -17,4 +17,5 @@ urlpatterns = [
     path('songs/<str:pk>/', views.SongDetail.as_view(), name = 'song-detail'),
     path('playlists/', views.PlaylistList.as_view(), name='playlist-list'),
     path('playlists/<str:pk>/', views.PlaylistDetail.as_view(), name='playlist-detail'),
+    path('search/', views.SearchView.as_view(), name='search'),
 ]
