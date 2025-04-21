@@ -163,6 +163,12 @@ class SongSerializer(BaseMediaURLSerializer):
     # Read-only calculated fields?
     number_of_plays = serializers.IntegerField(required=False, read_only=True, default=0)
     number_of_likes = serializers.IntegerField(required=False, read_only=True, default=0)
+    
+     # --- Trường để nhận file upload ---
+    # write_only=True vì không lưu trực tiếp file object vào Mongo
+    # required=False nếu không bắt buộc phải upload file khi tạo/sửa
+    audio_file = serializers.FileField(write_only=True, required=False, allow_null=True)
+    # ---------------------------------
 
     file_url = serializers.SerializerMethodField(read_only=True) # Read-only URL field
     # Field for receiving relative path during POST/PUT (optional)
@@ -193,3 +199,13 @@ class PlaylistSerializer(serializers.Serializer):
     # song_ids = serializers.ListField(child=ObjectIdField(), required=False, default=list)
     # Option 2: List of embedded song details (use PlaylistSongSerializer or similar)
     songs = PlaylistSongSerializer(many=True, required=False, default=list) # Matches ERD more closely
+    
+class ArtistSelectSerializer(serializers.Serializer):
+    """ Trả về ID và tên Artist cho dropdown select. """
+    _id = ObjectIdField(read_only=True)
+    artist_name = serializers.CharField(read_only=True)
+
+class AlbumSelectSerializer(serializers.Serializer):
+    """ Trả về ID và tên Album cho dropdown select. """
+    _id = ObjectIdField(read_only=True)
+    album_name = serializers.CharField(read_only=True)

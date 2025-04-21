@@ -12,6 +12,8 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 
 from pathlib import Path
 import os
+from datetime import timedelta
+from django.conf import settings
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -38,6 +40,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework_simplejwt',
     'rest_framework',
     'corsheaders',
     'MusicAPI',
@@ -135,3 +138,59 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'mediafiles')
 
 if not os.path.exists(MEDIA_ROOT):
     os.makedirs(MEDIA_ROOT)
+    
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        # Sử dụng JWT làm phương thức xác thực chính/mặc định
+        'MusicAPI.authentication.CustomJWTAuthentication',
+        # Bạn có thể giữ lại các phương thức khác nếu cần (vd: Session cho Django Admin UI)
+        # 'rest_framework.authentication.SessionAuthentication',
+        # 'rest_framework.authentication.BasicAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        # Mặc định, yêu cầu người dùng phải là Admin (is_staff=True)
+        # cho TẤT CẢ các API endpoints.
+        # Bạn sẽ cần override permission này cho các API public (nếu có).
+        'MusicAPI.permissions.IsAdminFromMongo',
+        # Hoặc 'rest_framework.permissions.IsAuthenticated' nếu chỉ cần đăng nhập
+        # Hoặc 'rest_framework.permissions.AllowAny' nếu muốn public mặc định
+    ],
+    'DEFAULT_PARSER_CLASSES': [
+        'rest_framework.parsers.JSONParser',
+        'rest_framework.parsers.FormParser',
+        'rest_framework.parsers.MultiPartParser' # <<< Đảm bảo có parser này
+    ],
+    # ... các settings khác của DRF ...
+    }
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60), # Ví dụ: Access token hết hạn sau 60 phút
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),    # Ví dụ: Refresh token hết hạn sau 1 ngày
+    "ROTATE_REFRESH_TOKENS": False, # Đặt là True nếu muốn refresh token cũ bị vô hiệu khi tạo mới
+    "BLACKLIST_AFTER_ROTATION": False, # Cần cài đặt thêm nếu muốn blacklist token cũ
+    "UPDATE_LAST_LOGIN": True, # Cập nhật last_login của user khi login thành công
+
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": settings.SECRET_KEY, # Dùng SECRET_KEY mặc định của Django
+    "VERIFYING_KEY": None,
+    "AUDIENCE": None,
+    "ISSUER": None,
+    "JWK_URL": None,
+    "LEEWAY": 0,
+
+    "AUTH_HEADER_TYPES": ("Bearer",), # Chỉ chấp nhận header "Bearer <token>"
+    "AUTH_HEADER_NAME": "HTTP_AUTHORIZATION",
+    "USER_ID_FIELD": "id", # Trường ID trong model User của Django
+    "USER_ID_CLAIM": "user_mongo_id",
+    "USER_AUTHENTICATION_RULE": "rest_framework_simplejwt.authentication.default_user_authentication_rule",
+
+    "AUTH_TOKEN_CLASSES": ("rest_framework_simplejwt.tokens.AccessToken",),
+    "TOKEN_TYPE_CLAIM": "token_type",
+    "TOKEN_USER_CLASS": "MusicAPI.token_user.MongoTokenUser",
+
+    "JTI_CLAIM": "jti",
+
+    "SLIDING_TOKEN_REFRESH_EXP_CLAIM": "refresh_exp",
+    "SLIDING_TOKEN_LIFETIME": timedelta(minutes=5), # Không dùng nếu không bật sliding tokens
+    "SLIDING_TOKEN_REFRESH_LIFETIME": timedelta(days=1), # Không dùng nếu không bật sliding tokens
+}
