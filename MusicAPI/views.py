@@ -7,7 +7,8 @@ from sklearn import pipeline
 from .serializers import (
     MusicGenreSerializer, UserSerializer, AdminSerializer,
     ArtistSerializer, AlbumSerializer, SongSerializer,
-    PlaylistSerializer, AlbumSelectSerializer, ArtistSelectSerializer
+    PlaylistSerializer, AlbumSelectSerializer, ArtistSelectSerializer,
+    MusicGenreSelectSerializer
 )
 from pymongo import MongoClient
 from bson import ObjectId
@@ -125,6 +126,26 @@ class AdminLoginView(APIView):
 
         return Response({"detail": "Invalid credentials or not an authorized admin."}, status=401)
 
+class AdminStatsView(APIView):
+    permission_classes = [IsAdminFromMongo] # Chỉ admin được xem thống kê
+
+    def get(self, request):
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        try:
+            stats = {
+                'total_songs': db.songs.count_documents({}),
+                'total_artists': db.artists.count_documents({}),
+                'total_albums': db.albums.count_documents({}),
+                'total_users': db.users.count_documents({}),
+                'total_genres': db.musicgenres.count_documents({}),
+                'total_playlists': db.playlists.count_documents({}),
+                # Thêm các thống kê khác nếu muốn (vd: active users)
+                # 'active_users': db.users.count_documents({'is_active': True}),
+            }
+            return Response(stats)
+        except Exception as e:
+            print(f"Error fetching admin stats: {e}")
+            return Response({"error": "Could not retrieve statistics"}, 500)
 
 # --- MusicGenre Views ---
 class MusicGenreList(APIView):
@@ -182,78 +203,226 @@ class MusicGenreDetail(APIView):
         return Response(status=status.HTTP_404_NOT_FOUND)
 
 
-# --- User Views ---
+def get_object(collection, pk_str):
+    if not db: return None
+    try: return collection.find_one({'_id': ObjectId(pk_str)})
+    except: return None
+
+# --- User Views (CRUD cho Admin) ---
+
 class UserList(APIView):
-    def get_permissions(self):
-        if self.request.method == 'GET':
-            return [AllowAny()] # Ai cũng xem được list
-        # Các method khác (POST) sẽ dùng default (IsAdminFromMongo)
-        return super().get_permissions()
-    
+    """ API endpoint để admin lấy danh sách hoặc tạo user mới. """
+    permission_classes = [IsAdminFromMongo] # Chỉ admin được truy cập
+
     def get(self, request):
-        if not db: return Response({"error": "Database connection failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        users = list(db.users.find())
-        serializer = UserSerializer(users, many=True, context={'request': request}) # Thêm context
-        return Response(serializer.data)
+        """ Lấy danh sách tất cả người dùng. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        try:
+            # TODO: Thêm pagination
+            # Loại bỏ trường password khi fetch
+            users_cursor = db.users.find({}, {'password': 0})
+            serializer = UserSerializer(list(users_cursor), many=True, context={'request': request})
+            return Response(serializer.data)
+        except Exception as e:
+            print(f"[GET /users/] Error: {e}")
+            return Response({"error": "Could not retrieve users"}, 500)
 
     def post(self, request):
-        if not db: return Response({"error": "Database connection failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        serializer = UserSerializer(data=request.data, context={'request': request}) # Thêm context
+        """ Admin tạo user mới. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+
+        # Chuẩn bị dữ liệu (tương tự Song/Artist)
+        mutable_post_data = request.POST.copy()
+        data_for_serializer = mutable_post_data.dict()
+        if 'profile_picture' in request.FILES:
+            data_for_serializer['profile_picture'] = request.FILES['profile_picture']
+        else:
+            data_for_serializer['profile_picture'] = None
+
+        # Serializer sẽ validate username/email trùng, required fields
+        serializer = UserSerializer(data=data_for_serializer, context={'request': request})
+
         if serializer.is_valid():
             user_data = serializer.validated_data
-            # TODO: Kiểm tra email/username đã tồn tại chưa
-            # Hash password trước khi lưu
-            user_data['password'] = make_password(user_data['password'])
-            # TODO: Xử lý lưu file 'profile_picture' nếu có upload
-            result = db.users.insert_one(user_data)
-            created_user = db.users.find_one({'_id': result.inserted_id})
-            if created_user:
-                response_serializer = UserSerializer(created_user, context={'request': request}) # Thêm context
-                return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-            return Response({"error": "Could not retrieve created user"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            profile_picture_file = user_data.pop('profile_picture', None)
+            password = user_data.pop('password', None) # Lấy password ra
+
+            # --- BẮT BUỘC CÓ PASSWORD KHI TẠO MỚI ---
+            if not password:
+                 return Response({"password": ["Password is required for new users."]}, status=status.HTTP_400_BAD_REQUEST)
+            # -----------------------------------------
+
+            saved_picture_path = None
+            new_user_id = None
+
+            try:
+                # 1. Hash password
+                user_data['password'] = make_password(password)
+                # Mặc định is_staff=False, is_active=True (có thể cho phép admin set)
+                user_data['is_staff'] = user_data.get('is_staff', False) # Ví dụ nếu cho phép set
+                user_data['is_active'] = user_data.get('is_active', True)
+                if 'date_of_birth' in user_data and user_data['date_of_birth']:
+                     user_data['date_of_birth'] = datetime.combine(user_data['date_of_birth'], datetime.min.time())
+                else: user_data['date_of_birth'] = None
+
+                # 2. Insert document user (chưa có path ảnh)
+                insert_result = db.users.insert_one(user_data)
+                new_user_id = insert_result.inserted_id
+                print(f"[POST User] Created initial user doc: {new_user_id}")
+
+                # 3. Lưu ảnh profile nếu có
+                if profile_picture_file and new_user_id:
+                    original_filename, file_extension = os.path.splitext(profile_picture_file.name); file_extension = file_extension.lower()
+                    new_filename = f"{str(new_user_id)}{file_extension}"
+                    relative_dir = os.path.join('users', 'avatars').replace("\\", "/")
+                    saved_picture_path_relative = os.path.join(relative_dir, new_filename).replace("\\", "/")
+                    saved_picture_path = default_storage.save(saved_picture_path_relative, profile_picture_file)
+                    print(f"[POST User] Saved avatar as: {saved_picture_path}")
+
+                    # 4. Cập nhật document với path ảnh
+                    db.users.update_one( {'_id': new_user_id}, {'$set': {'profile_picture': saved_picture_path}} )
+                    print(f"[POST User] Updated doc {new_user_id} with avatar path: {saved_picture_path}")
+                else: saved_picture_path = None
+
+                # 5. Fetch lại dữ liệu (loại bỏ password) và trả về
+                created_user_doc = db.users.find_one({'_id': new_user_id}, {'password': 0})
+                if created_user_doc:
+                     response_serializer = UserSerializer(created_user_doc, context={'request': request})
+                     return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+                else: raise Exception("Could not retrieve created user.")
+
+            except Exception as e:
+                 # Rollback
+                 print(f"[POST User] Error: {e}")
+                 if new_user_id: db.users.delete_one({'_id': new_user_id}); print(f"Rolled back user doc {new_user_id}")
+                 if saved_picture_path and default_storage.exists(saved_picture_path): default_storage.delete(saved_picture_path); print(f"Rolled back avatar file {saved_picture_path}")
+                 return Response({"error": f"Could not create user: {e}"}, status=500)
+        else:
+            print("[POST User] Serializer Errors:", serializer.errors)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 class UserDetail(APIView):
-    def get_permissions(self):
-        if self.request.method == 'GET':
-            return [AllowAny()] # Ai cũng xem được list
-        # Các method khác (POST) sẽ dùng default (IsAdminFromMongo)
-        return super().get_permissions()
-    
+    """ API endpoint để admin lấy, sửa, xóa thông tin user. """
+    permission_classes = [IsAdminFromMongo] # Chỉ admin
+
     def get(self, request, pk):
+        """ Lấy chi tiết user (không bao gồm password). """
+        if not db: return Response({"error": "Database connection failed"}, 500)
         user = get_object(db.users, pk)
         if user:
-            serializer = UserSerializer(user, context={'request': request}) # Thêm context
+            # Loại bỏ password trước khi serialize
+            user.pop('password', None)
+            serializer = UserSerializer(user, context={'request': request})
             return Response(serializer.data)
         return Response(status=status.HTTP_404_NOT_FOUND)
 
     def put(self, request, pk):
-        user = get_object(db.users, pk)
-        if user:
-            # TODO: Check permissions (chỉ user đó hoặc admin được sửa)
-            serializer = UserSerializer(user, data=request.data, partial=True, context={'request': request}) # Thêm context
-            if serializer.is_valid():
-                update_data = serializer.validated_data
-                # Hash password mới nếu được cung cấp
-                if 'password' in update_data:
-                    update_data['password'] = make_password(update_data['password'])
-                # TODO: Xử lý upload/xóa file 'profile_picture' nếu có
-                db.users.update_one({'_id': ObjectId(pk)}, {'$set': update_data})
-                updated_user = get_object(db.users, pk)
-                if updated_user:
-                     response_serializer = UserSerializer(updated_user, context={'request': request}) # Thêm context
-                     return Response(response_serializer.data)
-                return Response(status=status.HTTP_404_NOT_FOUND) # Should not happen if update succeeded
+        """ Cập nhật thông tin user. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+
+        user_id = None
+        try: user_id = ObjectId(pk)
+        except Exception: return Response({"error": "Invalid User ID format"}, 400)
+
+        user = db.users.find_one({'_id': user_id})
+        if not user: return Response(status=status.HTTP_404_NOT_FOUND)
+
+        # Chuẩn bị dữ liệu
+        mutable_post_data = request.POST.copy()
+        data_for_serializer = mutable_post_data.dict()
+        if 'profile_picture' in request.FILES:
+            data_for_serializer['profile_picture'] = request.FILES['profile_picture']
+
+        # Truyền instance cũ để serializer biết là update
+        serializer = UserSerializer(user, data=data_for_serializer, partial=True, context={'request': request})
+
+        if serializer.is_valid():
+            update_data = serializer.validated_data
+            new_picture_file = update_data.pop('profile_picture', None)
+            new_password = update_data.pop('password', None) # Lấy password mới (nếu có)
+            old_picture_path = user.get('profile_picture')
+            new_picture_path = None
+            picture_path_to_save = old_picture_path
+
+            try:
+                # 1. Xử lý ảnh profile mới (nếu có)
+                if new_picture_file:
+                    # ... (Logic xóa file cũ, lưu file mới, cập nhật picture_path_to_save tương tự Album/Artist) ...
+                    original_filename, file_extension = os.path.splitext(new_picture_file.name); file_extension = file_extension.lower()
+                    new_filename = f"{pk}{file_extension}"; relative_dir = os.path.join('users', 'avatars').replace("\\","/")
+                    new_picture_path_relative = os.path.join(relative_dir, new_filename).replace("\\","/")
+                    if old_picture_path and old_picture_path != new_picture_path_relative and default_storage.exists(old_picture_path):
+                        try: default_storage.delete(old_picture_path); print(f"[PUT User/{pk}] Deleted old picture")
+                        except Exception as file_e: print(f"Warning: Could not delete old picture {old_picture_path}: {file_e}")
+                    new_picture_path = default_storage.save(new_picture_path_relative, new_picture_file); print(f"[PUT User/{pk}] Saved new picture as: {new_picture_path}")
+                    picture_path_to_save = new_picture_path
+
+                update_data['profile_picture'] = picture_path_to_save # Cập nhật path vào data
+
+                # 2. Hash password mới nếu có
+                if new_password:
+                    update_data['password'] = make_password(new_password)
+                # Else: không cập nhật password
+
+                # 3. Chuyển đổi kiểu dữ liệu khác nếu cần
+                if 'date_of_birth' in update_data and update_data['date_of_birth']:
+                    update_data['date_of_birth'] = datetime.combine(update_data['date_of_birth'], datetime.min.time())
+                elif 'date_of_birth' in update_data: update_data['date_of_birth'] = None
+
+                # 4. Cập nhật MongoDB
+                if update_data:
+                    db.users.update_one({'_id': user_id}, {'$set': update_data})
+                    print(f"[PUT User/{pk}] Updated user document")
+                else: print(f"[PUT User/{pk}] No data fields to update.")
+
+                # 5. Fetch lại dữ liệu (bỏ password) và trả về
+                updated_user_doc = db.users.find_one({'_id': user_id}, {'password': 0})
+                if updated_user_doc:
+                    response_serializer = UserSerializer(updated_user_doc, context={'request': request})
+                    return Response(response_serializer.data)
+                else: return Response(status=status.HTTP_404_NOT_FOUND)
+
+            except Exception as e:
+                print(f"[PUT User/{pk}] Error: {e}")
+                # Cân nhắc rollback file mới
+                return Response({"error": f"Could not update user {pk}: {e}"}, 500)
+        else:
+            print(f"[PUT User/{pk}] Serializer Errors:", serializer.errors)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        return Response(status=status.HTTP_404_NOT_FOUND)
 
     def delete(self, request, pk):
-        # TODO: Check permissions (admin?)
-        # TODO: Xử lý xóa file 'profile_picture' trên storage
-        result = db.users.delete_one({'_id': ObjectId(pk)})
-        if result.deleted_count == 1:
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        return Response(status=status.HTTP_404_NOT_FOUND)
+        """ Xóa user và ảnh profile liên quan. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        user_id = None
+        try: user_id = ObjectId(pk)
+        except Exception: return Response({"error": "Invalid User ID format"}, 400)
+
+        user = db.users.find_one({'_id': user_id})
+        if user:
+            try:
+                picture_path_to_delete = user.get('profile_picture')
+                # TODO: Cân nhắc xóa các bản ghi liên quan khác (ví dụ: trong collection 'admin' nếu user này là admin?)
+                # result_admin = db.admin.delete_many({'user_id': user_id})
+                # print(f"Deleted {result_admin.deleted_count} admin records for user {pk}")
+
+                result = db.users.delete_one({'_id': user_id}) # Xóa user
+
+                if result.deleted_count == 1:
+                    # Xóa ảnh profile
+                    if picture_path_to_delete and default_storage.exists(picture_path_to_delete):
+                        try:
+                            default_storage.delete(picture_path_to_delete)
+                            print(f"[DELETE User/{pk}] Deleted profile picture: {picture_path_to_delete}")
+                        except Exception as file_e:
+                            print(f"[DELETE User/{pk}] Warning: Could not delete profile picture {picture_path_to_delete}: {file_e}")
+                    return Response(status=status.HTTP_204_NO_CONTENT)
+                else: return Response({"error": f"Could not delete user {pk} from DB"}, 500)
+            except Exception as e:
+                 print(f"[DELETE User/{pk}] Error: {e}")
+                 return Response({"error": f"Could not complete user deletion for {pk}"}, 500)
+        else:
+            return Response(status=status.HTTP_404_NOT_FOUND)
 
 
 # --- Admin Views ---
@@ -326,17 +495,96 @@ class ArtistList(APIView):
         return Response(serializer.data)
 
     def post(self, request):
-        if not db: return Response({"error": "Database connection failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        serializer = ArtistSerializer(data=request.data, context={'request': request}) # Thêm context
+        """ Tạo nghệ sĩ mới, xử lý upload avatar. """
+        if not db: return Response({"error": "Database connection failed"}, status=500)
+
+        # Xử lý dữ liệu đầu vào
+        mutable_post_data = request.POST.copy()
+        data_for_serializer = mutable_post_data.dict()
+
+        # Xử lý musicgenre_ids
+        if 'musicgenre_ids' in mutable_post_data:
+            genre_id_list_str = mutable_post_data.getlist('musicgenre_ids')
+            valid_genre_ids = []
+            for gid_str in genre_id_list_str:
+                gid_str = gid_str.strip()
+                if not gid_str: continue
+                try: valid_genre_ids.append(ObjectId(gid_str))
+                except Exception: return Response({"musicgenre_ids": [f"Invalid ObjectId format: '{gid_str}'"]}, status=400)
+            data_for_serializer['musicgenre_ids'] = valid_genre_ids
+        else:
+             data_for_serializer['musicgenre_ids'] = [] # Đảm bảo là list rỗng nếu không gửi
+
+        # Thêm file vào data cho serializer validate
+        if 'artist_avatar' in request.FILES:
+            data_for_serializer['artist_avatar'] = request.FILES['artist_avatar']
+        else:
+            data_for_serializer['artist_avatar'] = None # Hoặc bỏ key này nếu field không bắt buộc
+
+        print("--- [POST Artist] Data for Serializer ---")
+        print({k: v for k, v in data_for_serializer.items() if k != 'artist_avatar'})
+        if data_for_serializer.get('artist_avatar'): print("artist_avatar: [File Object]")
+        print("--------------------------------------")
+
+        serializer = ArtistSerializer(data=data_for_serializer, context={'request': request})
+
         if serializer.is_valid():
-            # TODO: Xử lý lưu file 'artist_avatar' nếu có upload
-            result = db.artists.insert_one(serializer.validated_data)
-            created_artist = db.artists.find_one({'_id': result.inserted_id})
-            if created_artist:
-                response_serializer = ArtistSerializer(created_artist, context={'request': request}) # Thêm context
-                return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-            return Response({"error": "Could not retrieve created artist"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            artist_data = serializer.validated_data
+            avatar_file = artist_data.pop('artist_avatar', None)
+
+            saved_avatar_path = None
+            new_artist_id = None
+
+            try:
+                # 1. Insert document artist (chưa có avatar path) để lấy ID
+                mongo_data = {k: v for k, v in artist_data.items()}
+                if 'date_of_birth' in mongo_data and mongo_data['date_of_birth']:
+                    mongo_data['date_of_birth'] = datetime.combine(mongo_data['date_of_birth'], datetime.min.time())
+                else: mongo_data['date_of_birth'] = None
+
+                # Đảm bảo genre_ids là list ObjectId (serializer đã validate)
+                # mongo_data['musicgenre_ids'] = [ObjectId(gid) for gid in mongo_data.get('musicgenre_ids', [])]
+
+                insert_result = db.artists.insert_one(mongo_data)
+                new_artist_id = insert_result.inserted_id
+                print(f"[POST Artist] Created initial artist doc: {new_artist_id}")
+
+                # 2. Lưu avatar nếu có
+                if avatar_file and new_artist_id:
+                    original_filename, file_extension = os.path.splitext(avatar_file.name)
+                    file_extension = file_extension.lower()
+                    new_filename = f"{str(new_artist_id)}{file_extension}"
+                    relative_dir = os.path.join('artists', 'avatars').replace("\\","/")
+                    saved_avatar_path_relative = os.path.join(relative_dir, new_filename).replace("\\", "/")
+
+                    saved_avatar_path = default_storage.save(saved_avatar_path_relative, avatar_file)
+                    print(f"[POST Artist] Saved avatar as: {saved_avatar_path}")
+
+                    # 3. Cập nhật document với avatar path
+                    db.artists.update_one(
+                        {'_id': new_artist_id},
+                        {'$set': {'artist_avatar': saved_avatar_path}} # Lưu path tương đối trả về
+                    )
+                    print(f"[POST Artist] Updated doc {new_artist_id} with avatar path: {saved_avatar_path}")
+                else:
+                    saved_avatar_path = None
+
+                # 4. Fetch lại và trả về response
+                created_artist_doc = db.artists.find_one({'_id': new_artist_id})
+                if created_artist_doc:
+                     response_serializer = ArtistSerializer(created_artist_doc, context={'request': request})
+                     return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+                else: raise Exception("Could not retrieve created artist.")
+
+            except Exception as e:
+                 # Rollback
+                 print(f"[POST Artist] Error: {e}")
+                 if new_artist_id: db.artists.delete_one({'_id': new_artist_id}); print(f"Rolled back artist doc {new_artist_id}")
+                 if saved_avatar_path and default_storage.exists(saved_avatar_path): default_storage.delete(saved_avatar_path); print(f"Rolled back avatar file {saved_avatar_path}")
+                 return Response({"error": f"Could not create artist: {e}"}, status=500)
+        else:
+            print("[POST Artist] Serializer Errors:", serializer.errors)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class ArtistDetail(APIView):
     def get_permissions(self):
@@ -354,21 +602,101 @@ class ArtistDetail(APIView):
         return Response(status=status.HTTP_404_NOT_FOUND)
 
     def put(self, request, pk):
-        # TODO: Add permission checks?
-        artist = get_object(db.artists, pk)
-        if artist:
-            serializer = ArtistSerializer(artist, data=request.data, partial=True, context={'request': request}) # Thêm context
-            if serializer.is_valid():
-                 # TODO: Xử lý upload/xóa file 'artist_avatar' nếu có
-                update_data = serializer.validated_data
-                db.artists.update_one({'_id': ObjectId(pk)}, {'$set': update_data})
-                updated_artist = get_object(db.artists, pk)
-                if updated_artist:
-                     response_serializer = ArtistSerializer(updated_artist, context={'request': request}) # Thêm context
-                     return Response(response_serializer.data)
-                return Response(status=status.HTTP_404_NOT_FOUND)
+        """ Cập nhật thông tin nghệ sĩ, bao gồm cả avatar. """
+        if not db: return Response({"error": "Database connection failed"}, status=500)
+
+        artist_id = None
+        try: artist_id = ObjectId(pk)
+        except Exception: return Response({"error": "Invalid Artist ID format"}, status=400)
+
+        artist = db.artists.find_one({'_id': artist_id}) # Lấy dữ liệu hiện tại
+        if not artist: return Response(status=status.HTTP_404_NOT_FOUND)
+
+        # --- Xử lý dữ liệu đầu vào cho PUT ---
+        mutable_post_data = request.POST.copy()
+        data_for_serializer = mutable_post_data.dict()
+
+        # Xử lý musicgenre_ids nếu được gửi lên
+        if 'musicgenre_ids' in mutable_post_data:
+            genre_id_list_str = mutable_post_data.getlist('musicgenre_ids')
+            valid_genre_ids = []
+            for gid_str in genre_id_list_str:
+                gid_str = gid_str.strip()
+                if not gid_str: continue
+                try: valid_genre_ids.append(ObjectId(gid_str))
+                except Exception: return Response({"musicgenre_ids": [f"Invalid ObjectId format: '{gid_str}'"]}, status=400)
+            # Cho phép gửi mảng rỗng để xóa hết genres
+            data_for_serializer['musicgenre_ids'] = valid_genre_ids
+
+        # Thêm file nếu có
+        if 'artist_avatar' in request.FILES:
+            data_for_serializer['artist_avatar'] = request.FILES['artist_avatar']
+        # Không cần else, nếu không có file thì serializer sẽ bỏ qua
+
+        print(f"--- [PUT Artist/{pk}] Data for Serializer ---")
+        print({k: v for k, v in data_for_serializer.items() if k != 'artist_avatar'})
+        if data_for_serializer.get('artist_avatar'): print("artist_avatar: [File Object]")
+        print("------------------------------------------")
+
+        serializer = ArtistSerializer(artist, data=data_for_serializer, partial=True, context={'request': request})
+
+        if serializer.is_valid():
+            update_data = serializer.validated_data
+            new_avatar_file = update_data.pop('artist_avatar', None)
+            old_avatar_path = artist.get('artist_avatar')
+            new_avatar_path = None
+            avatar_path_to_save_in_db = old_avatar_path # Mặc định giữ path cũ
+
+            try:
+                # 1. Xử lý avatar mới (nếu có)
+                if new_avatar_file:
+                    # Tạo tên file và đường dẫn
+                    original_filename, file_extension = os.path.splitext(new_avatar_file.name)
+                    file_extension = file_extension.lower()
+                    new_filename = f"{pk}{file_extension}" # Dùng pk (string _id)
+                    relative_dir = os.path.join('artists', 'avatars').replace("\\", "/")
+                    new_avatar_path_relative = os.path.join(relative_dir, new_filename).replace("\\", "/")
+
+                    # Xóa file cũ trước khi lưu file mới (nếu có và khác tên)
+                    if old_avatar_path and old_avatar_path != new_avatar_path_relative and default_storage.exists(old_avatar_path):
+                        try: default_storage.delete(old_avatar_path); print(f"[PUT Artist/{pk}] Deleted old avatar: {old_avatar_path}")
+                        except Exception as file_e: print(f"[PUT Artist/{pk}] Warning: Could not delete old avatar {old_avatar_path}: {file_e}")
+
+                    # Lưu file mới
+                    new_avatar_path = default_storage.save(new_avatar_path_relative, new_avatar_file)
+                    print(f"[PUT Artist/{pk}] Saved new avatar as: {new_avatar_path}")
+                    avatar_path_to_save_in_db = new_avatar_path # Cập nhật path sẽ lưu
+
+                # Cập nhật trường artist_avatar trong data sẽ $set
+                update_data['artist_avatar'] = avatar_path_to_save_in_db
+
+                # Chuyển đổi kiểu dữ liệu nếu cần (serializer đã làm)
+                if 'date_of_birth' in update_data and update_data['date_of_birth']:
+                    update_data['date_of_birth'] = datetime.combine(update_data['date_of_birth'], datetime.min.time())
+                elif 'date_of_birth' in update_data: update_data['date_of_birth'] = None # Cho phép xóa
+
+                # 2. Cập nhật document trong MongoDB
+                if update_data: # Chỉ update nếu có trường thay đổi
+                    db.artists.update_one({'_id': artist_id}, {'$set': update_data})
+                    print(f"[PUT Artist/{pk}] Updated artist document")
+                else:
+                    print(f"[PUT Artist/{pk}] No data fields to update.")
+
+                # 3. Fetch lại dữ liệu hoàn chỉnh để trả về
+                updated_artist_doc = db.artists.find_one({'_id': artist_id})
+                if updated_artist_doc:
+                    response_serializer = ArtistSerializer(updated_artist_doc, context={'request': request})
+                    return Response(response_serializer.data)
+                else:
+                    return Response(status=status.HTTP_404_NOT_FOUND)
+
+            except Exception as e:
+                print(f"[PUT Artist/{pk}] Error during update/file handling: {e}")
+                # Cân nhắc rollback file mới nếu update DB lỗi
+                return Response({"error": f"Could not update artist {pk}: {e}"}, status=500)
+        else:
+            print(f"[PUT Artist/{pk}] Serializer Errors:", serializer.errors)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        return Response(status=status.HTTP_404_NOT_FOUND)
 
     def delete(self, request, pk):
          # TODO: Add permission checks?
@@ -379,90 +707,316 @@ class ArtistDetail(APIView):
         return Response(status=status.HTTP_404_NOT_FOUND)
 
 
+# --- Aggregation Pipeline Helper cho Album (Lấy Artist lồng nhau) ---
+def get_album_aggregation_pipeline():
+    return [
+        { '$lookup': {
+            'from': 'artists', # Tên collection artists
+            'localField': 'artist_id',
+            'foreignField': '_id',
+            'as': 'artist_details'
+        }},
+        { '$unwind': { # Giả sử mỗi album chỉ có 1 artist
+            'path': '$artist_details',
+            'preserveNullAndEmptyArrays': True # Giữ album nếu không tìm thấy artist
+        }},
+        { '$project': {
+            '_id': 1, 'album_name': 1, 'release_time': 1, 'description': 1,
+            'image': 1, # Giữ lại path gốc để serializer tạo URL
+            'artist_id': 1, # Giữ lại ID gốc
+            'number_of_songs': 1, 'number_of_plays': 1, 'number_of_likes': 1, # Nếu các trường này có trong DB
+            # Tạo trường artist lồng nhau
+            'artist': { '$cond': {
+                'if': '$artist_details',
+                'then': {
+                    '_id': '$artist_details._id',
+                    'artist_name': '$artist_details.artist_name',
+                    'artist_avatar': '$artist_details.artist_avatar' # Cho ArtistBasicSerializer
+                 },
+                'else': None
+            }}
+        }}
+    ]
+
+# --- Views cho Select Options ---
+class ArtistSelectView(APIView): 
+    permission_classes = [IsAdminFromMongo] # Chỉ admin mới cần lấy list này?
+    def get(self, request):
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        try:
+            artists = list(db.artists.find({}, {'_id': 1, 'artist_name': 1}).sort('artist_name', 1))
+            serializer = ArtistSelectSerializer(artists, many=True) # Sử dụng ArtistSelectSerializer
+            return Response(serializer.data)
+        except Exception as e: return Response({"error": f"Could not retrieve artist options: {e}"}, 500)
+
+
+# --- >>> THÊM VIEW NÀY <<< ---
+class AlbumSelectView(APIView):
+    """ Cung cấp danh sách Album rút gọn cho select options. """
+    permission_classes = [IsAdminFromMongo] # Chỉ admin?
+    def get(self, request):
+        if not db: return Response({"error": "Database connection failed"}, status=500)
+        try:
+            # Chỉ lấy _id và album_name, sắp xếp theo tên
+            # Nếu cần tên artist: pipeline = [{ '$lookup': ... }, {'$project':{...}}]
+            albums_cursor = db.albums.find({}, {'_id': 1, 'album_name': 1}).sort('album_name', 1)
+            serializer = AlbumSelectSerializer(list(albums_cursor), many=True)
+            return Response(serializer.data)
+        except Exception as e:
+            print(f"Error fetching album options: {e}")
+            return Response({"error": "Could not retrieve album options"}, status=500)
+# ----------------------------
+
 # --- Album Views ---
+
 class AlbumList(APIView):
+    _get_pipeline_stages = staticmethod(get_album_aggregation_pipeline)
+
     def get_permissions(self):
         if self.request.method == 'GET':
-            return [AllowAny()] # Ai cũng xem được list
-        # Các method khác (POST) sẽ dùng default (IsAdminFromMongo)
-        return super().get_permissions()
-    
-    def get(self, request):
-        if not db: return Response({"error": "Database connection failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        # TODO: Cần fetch dữ liệu artist lồng vào đây bằng $lookup hoặc xử lý sau
-        # Ví dụ đơn giản (chưa tối ưu, không có $lookup):
-        albums_cursor = db.albums.find()
-        albums_list = []
-        for album in albums_cursor:
-            artist_info = get_object(db.artists, str(album.get('artist_id'))) # Chuyển ObjectId thành str
-            album['artist'] = artist_info # Gán artist vào document album
-            albums_list.append(album)
+            return [AllowAny()] # Ai cũng có thể xem danh sách album
+        return [IsAdminFromMongo()] # Chỉ admin được tạo album
 
-        serializer = AlbumSerializer(albums_list, many=True, context={'request': request}) # Thêm context
-        return Response(serializer.data)
+    def get(self, request):
+        """ Lấy danh sách album với thông tin artist lồng nhau. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        try:
+            pipeline = self._get_pipeline_stages()
+            pipeline.append({'$sort': {'album_name': 1}})
+            # TODO: Add pagination ($skip, $limit)
+            albums_list = list(db.albums.aggregate(pipeline))
+            serializer = AlbumSerializer(albums_list, many=True, context={'request': request})
+            return Response(serializer.data)
+        except Exception as e:
+            print(f"[GET /albums/] Error: {e}")
+            return Response({"error": "Could not retrieve albums"}, 500)
 
     def post(self, request):
-        if not db: return Response({"error": "Database connection failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        serializer = AlbumSerializer(data=request.data, context={'request': request}) # Thêm context
+        """ Tạo album mới, xử lý upload ảnh bìa. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+
+        # Chuẩn bị dữ liệu cho serializer (kết hợp text và file)
+        data_for_serializer = request.data.copy() # Dùng request.data vì có thể là multipart
+
+        # Kiểm tra và thêm file nếu có
+        if 'image' in request.FILES:
+            data_for_serializer['image'] = request.FILES['image']
+        else:
+            # Nếu field 'image' là bắt buộc trong serializer, lỗi sẽ xảy ra ở is_valid()
+             data_for_serializer['image'] = None # Đặt là None nếu không bắt buộc
+
+        print("--- [POST Album] Data for Serializer ---")
+        print({k: v for k, v in data_for_serializer.items() if k != 'image'})
+        if data_for_serializer.get('image'): print("image: [File Object]")
+        print("--------------------------------------")
+
+        serializer = AlbumSerializer(data=data_for_serializer, context={'request': request})
+
         if serializer.is_valid():
-             # TODO: Xử lý lưu file 'image' nếu có upload
-            result = db.albums.insert_one(serializer.validated_data)
-            # TODO: Fetch lại album cùng với artist lồng nhau để trả về
-            created_album_raw = db.albums.find_one({'_id': result.inserted_id})
-            if created_album_raw:
-                 artist_info = get_object(db.artists, str(created_album_raw.get('artist_id')))
-                 created_album_raw['artist'] = artist_info
-                 response_serializer = AlbumSerializer(created_album_raw, context={'request': request}) # Thêm context
-                 return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-            return Response({"error": "Could not retrieve created album"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            album_data = serializer.validated_data
+            image_file = album_data.pop('image', None) # Lấy file ra
+
+            saved_image_path = None
+            new_album_id = None
+
+            try:
+                # 1. Insert document album (chưa có image path) để lấy ID
+                mongo_data = {k: v for k, v in album_data.items()}
+                if 'release_time' in mongo_data and mongo_data['release_time']:
+                    mongo_data['release_time'] = datetime.combine(mongo_data['release_time'], datetime.min.time())
+                else: mongo_data['release_time'] = None
+                # artist_id đã được validate và là ObjectId từ serializer
+
+                insert_result = db.albums.insert_one(mongo_data)
+                new_album_id = insert_result.inserted_id
+                print(f"[POST Album] Created initial album doc: {new_album_id}")
+
+                # 2. Lưu ảnh nếu có
+                if image_file and new_album_id:
+                    original_filename, file_extension = os.path.splitext(image_file.name)
+                    file_extension = file_extension.lower()
+                    new_filename = f"{str(new_album_id)}{file_extension}"
+                    relative_dir = os.path.join('albums', 'covers').replace("\\", "/") # Thư mục con
+                    saved_image_path_relative = os.path.join(relative_dir, new_filename).replace("\\", "/")
+
+                    saved_image_path = default_storage.save(saved_image_path_relative, image_file)
+                    print(f"[POST Album] Saved image as: {saved_image_path}")
+
+                    # 3. Cập nhật document với image path
+                    db.albums.update_one(
+                        {'_id': new_album_id},
+                        {'$set': {'image': saved_image_path}}
+                    )
+                    print(f"[POST Album] Updated doc {new_album_id} with image path: {saved_image_path}")
+                else:
+                    saved_image_path = None # Không có file để rollback
+
+                # 4. Fetch lại dữ liệu hoàn chỉnh (có $lookup) để trả về
+                pipeline_detail = [{'$match': {'_id': new_album_id}}] + self._get_pipeline_stages()
+                created_album_agg = list(db.albums.aggregate(pipeline_detail))
+
+                if created_album_agg:
+                    response_serializer = AlbumSerializer(created_album_agg[0], context={'request': request})
+                    return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+                else: raise Exception("Could not retrieve created album details.")
+
+            except Exception as e:
+                 # Rollback
+                 print(f"[POST Album] Error: {e}")
+                 if new_album_id: db.albums.delete_one({'_id': new_album_id}); print(f"Rolled back album doc {new_album_id}")
+                 if saved_image_path and default_storage.exists(saved_image_path): default_storage.delete(saved_image_path); print(f"Rolled back image file {saved_image_path}")
+                 return Response({"error": f"Could not create album: {e}"}, status=500)
+        else:
+            print("[POST Album] Serializer Errors:", serializer.errors)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AlbumDetail(APIView):
+    _get_pipeline_stages = staticmethod(get_album_aggregation_pipeline)
+
     def get_permissions(self):
         if self.request.method == 'GET':
-            return [AllowAny()] # Ai cũng xem được list
-        # Các method khác (POST) sẽ dùng default (IsAdminFromMongo)
-        return super().get_permissions()
-    
+            return [AllowAny()]
+        return [IsAdminFromMongo()]
+
     def get(self, request, pk):
-        # TODO: Cần fetch dữ liệu artist và songs lồng vào đây bằng $lookup hoặc xử lý sau
-        album = get_object(db.albums, pk)
-        if album:
-             artist_info = get_object(db.artists, str(album.get('artist_id')))
-             album['artist'] = artist_info
-             # Ví dụ lấy songs (chưa tối ưu):
-             # album['songs'] = list(db.songs.find({'album_id': album['_id']}))
-             serializer = AlbumSerializer(album, context={'request': request}) # Thêm context
-             return Response(serializer.data)
-        return Response(status=status.HTTP_404_NOT_FOUND)
+        """ Lấy chi tiết album với thông tin artist lồng nhau. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        album_id = None
+        try: album_id = ObjectId(pk)
+        except Exception: return Response({"error": "Invalid Album ID format"}, 400)
+
+        try:
+            # TODO: Thêm $lookup cho songs nếu cần hiển thị danh sách bài hát
+            pipeline_detail = [{'$match': {'_id': album_id}}] + self._get_pipeline_stages()
+            album_agg = list(db.albums.aggregate(pipeline_detail))
+
+            if album_agg:
+                serializer = AlbumSerializer(album_agg[0], context={'request': request})
+                return Response(serializer.data)
+            else:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            print(f"[GET /albums/{pk}] Error: {e}")
+            return Response({"error": f"Could not retrieve album {pk}"}, 500)
 
     def put(self, request, pk):
-        album = get_object(db.albums, pk)
-        if album:
-            serializer = AlbumSerializer(album, data=request.data, partial=True, context={'request': request}) # Thêm context
-            if serializer.is_valid():
-                # TODO: Xử lý upload/xóa file 'image' nếu có
-                update_data = serializer.validated_data
-                db.albums.update_one({'_id': ObjectId(pk)}, {'$set': update_data})
-                # TODO: Fetch lại album cùng với artist lồng nhau để trả về
-                updated_album_raw = get_object(db.albums, pk)
-                if updated_album_raw:
-                    artist_info = get_object(db.artists, str(updated_album_raw.get('artist_id')))
-                    updated_album_raw['artist'] = artist_info
-                    response_serializer = AlbumSerializer(updated_album_raw, context={'request': request}) # Thêm context
+        """ Cập nhật thông tin album, bao gồm cả ảnh bìa. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+
+        album_id = None
+        try: album_id = ObjectId(pk)
+        except Exception: return Response({"error": "Invalid Album ID format"}, 400)
+
+        album = db.albums.find_one({'_id': album_id})
+        if not album: return Response(status=status.HTTP_404_NOT_FOUND)
+
+        # Chuẩn bị dữ liệu cho serializer
+        data_for_serializer = request.data.copy()
+        if 'image' in request.FILES:
+            data_for_serializer['image'] = request.FILES['image']
+        # Xử lý artist_id nếu được gửi (cần validate ObjectId và tồn tại)
+        if 'artist_id' in data_for_serializer:
+            artist_id_str = data_for_serializer['artist_id']
+            if artist_id_str and ObjectId.is_valid(artist_id_str):
+                 if get_object(db.artists, artist_id_str):
+                      data_for_serializer['artist_id'] = ObjectId(artist_id_str)
+                 else: return Response({"artist_id": ["Artist does not exist."]}, 400)
+            elif artist_id_str: # Nếu gửi nhưng không hợp lệ
+                 return Response({"artist_id": ["Invalid ObjectId format."]}, 400)
+            # Nếu không gửi artist_id, serializer với partial=True sẽ bỏ qua
+
+        print(f"--- [PUT Album/{pk}] Data for Serializer ---")
+        print({k: v for k, v in data_for_serializer.items() if k != 'image'})
+        if data_for_serializer.get('image'): print("image: [File Object]")
+        print("----------------------------------------")
+
+        serializer = AlbumSerializer(album, data=data_for_serializer, partial=True, context={'request': request})
+
+        if serializer.is_valid():
+            update_data = serializer.validated_data
+            new_image_file = update_data.pop('image', None)
+            old_image_path = album.get('image')
+            new_image_path = None
+            image_path_to_save_in_db = old_image_path
+
+            try:
+                # 1. Xử lý ảnh mới nếu có
+                if new_image_file:
+                    original_filename, file_extension = os.path.splitext(new_image_file.name); file_extension = file_extension.lower()
+                    new_filename = f"{pk}{file_extension}"
+                    relative_dir = os.path.join('albums', 'covers').replace("\\", "/")
+                    new_image_path_relative = os.path.join(relative_dir, new_filename).replace("\\", "/")
+
+                    # Xóa ảnh cũ trước
+                    if old_image_path and old_image_path != new_image_path_relative and default_storage.exists(old_image_path):
+                        try: default_storage.delete(old_image_path); print(f"[PUT Album/{pk}] Deleted old image: {old_image_path}")
+                        except Exception as file_e: print(f"[PUT Album/{pk}] Warning: Could not delete old image {old_image_path}: {file_e}")
+
+                    # Lưu ảnh mới
+                    new_image_path = default_storage.save(new_image_path_relative, new_image_file)
+                    print(f"[PUT Album/{pk}] Saved new image as: {new_image_path}")
+                    image_path_to_save_in_db = new_image_path
+
+                # Cập nhật trường image trong update_data
+                update_data['image'] = image_path_to_save_in_db
+
+                # Chuyển đổi kiểu dữ liệu nếu cần
+                if 'release_time' in update_data and update_data['release_time']:
+                    update_data['release_time'] = datetime.combine(update_data['release_time'], datetime.min.time())
+                elif 'release_time' in update_data: update_data['release_time'] = None
+                # artist_id đã là ObjectId nếu có trong update_data
+
+                # 2. Cập nhật MongoDB
+                if update_data:
+                    db.albums.update_one({'_id': album_id}, {'$set': update_data})
+                    print(f"[PUT Album/{pk}] Updated album document")
+                else:
+                    print(f"[PUT Album/{pk}] No data fields to update.")
+
+                # 3. Fetch lại dữ liệu hoàn chỉnh trả về
+                pipeline_detail = [{'$match': {'_id': album_id}}] + self._get_pipeline_stages()
+                updated_album_agg = list(db.albums.aggregate(pipeline_detail))
+
+                if updated_album_agg:
+                    response_serializer = AlbumSerializer(updated_album_agg[0], context={'request': request})
                     return Response(response_serializer.data)
-                return Response(status=status.HTTP_404_NOT_FOUND)
+                else: return Response(status=status.HTTP_404_NOT_FOUND)
+
+            except Exception as e:
+                print(f"[PUT Album/{pk}] Error during update/file handling: {e}")
+                return Response({"error": f"Could not update album {pk}: {e}"}, status=500)
+        else:
+            print(f"[PUT Album/{pk}] Serializer Errors:", serializer.errors)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        return Response(status=status.HTTP_404_NOT_FOUND)
 
     def delete(self, request, pk):
-        # TODO: Xử lý xóa file 'image' trên storage
-        result = db.albums.delete_one({'_id': ObjectId(pk)})
-        if result.deleted_count == 1:
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        return Response(status=status.HTTP_404_NOT_FOUND)
+        """ Xóa album và ảnh bìa liên quan. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        album_id = None
+        try: album_id = ObjectId(pk)
+        except Exception: return Response({"error": "Invalid Album ID format"}, 400)
 
+        album = db.albums.find_one({'_id': album_id})
+        if album:
+            try:
+                image_path_to_delete = album.get('image')
+                result = db.albums.delete_one({'_id': album_id})
+
+                if result.deleted_count == 1:
+                    if image_path_to_delete and default_storage.exists(image_path_to_delete):
+                        try:
+                            default_storage.delete(image_path_to_delete)
+                            print(f"[DELETE Album/{pk}] Deleted image file: {image_path_to_delete}")
+                        except Exception as file_e:
+                            print(f"[DELETE Album/{pk}] Warning: Could not delete image file {image_path_to_delete}: {file_e}")
+                    return Response(status=status.HTTP_204_NO_CONTENT)
+                else: return Response({"error": f"Could not delete album {pk} from DB"}, 500)
+            except Exception as e:
+                 print(f"[DELETE Album/{pk}] Error: {e}")
+                 return Response({"error": f"Could not complete album deletion for {pk}"}, 500)
+        else:
+            return Response(status=status.HTTP_404_NOT_FOUND)
 
 # --- Song Views (Đảm bảo context đã được thêm ở lần trước) ---
 # --- Aggregation Pipeline Helper ---
@@ -999,3 +1553,22 @@ class AlbumSelectView(APIView):
         except Exception as e:
             print(f"Error fetching album options: {e}")
             return Response({"error": "Could not retrieve album options"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class MusicGenreSelectView(APIView):
+    """ Cung cấp danh sách thể loại nhạc rút gọn cho select options. """
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()] # Ai cũng xem được list
+        # Các method khác (POST) sẽ dùng default (IsAdminFromMongo)
+        return super().get_permissions()
+    
+    def get(self, request):
+        if not db: return Response({"error": "Database connection failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        try:
+            # Chỉ lấy _id và genre_name, sắp xếp theo tên
+            genres_cursor = db.musicgenres.find({}, {'_id': 1, 'musicgenre_name': 1}).sort('musicgenre_name', 1)
+            serializer = MusicGenreSelectSerializer(list(genres_cursor), many=True)
+            return Response(serializer.data)
+        except Exception as e:
+            print(f"Error fetching music genre options: {e}")
+            return Response({"error": "Could not retrieve music genre options"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -2,6 +2,8 @@
 from rest_framework import serializers
 from bson import ObjectId
 from django.conf import settings
+
+
 # from urllib.parse import urljoin # Một lựa chọn khác
 
 # --- Custom ObjectId Field ---
@@ -75,6 +77,11 @@ class AlbumBasicSerializer(BaseMediaURLSerializer):
 
     def get_image_url(self, obj):
         return self._get_absolute_media_url(obj.get('image'))
+    
+class AlbumSelectSerializer(serializers.Serializer):
+    """ Trả về ID và tên Album cho dropdown select. """
+    _id = ObjectIdField(read_only=True)
+    album_name = serializers.CharField(read_only=True)
 
 
 # --- Main Model Serializers ---
@@ -85,18 +92,66 @@ class MusicGenreSerializer(serializers.Serializer):
 
 class UserSerializer(BaseMediaURLSerializer):
     _id = ObjectIdField(read_only=True)
-    username = serializers.CharField(max_length=50)
-    email = serializers.EmailField(max_length=100)
-    password = serializers.CharField(max_length=255, write_only=True) # Never send password back
-    profile_picture_url = serializers.SerializerMethodField(read_only=True) # Read-only URL field
+    username = serializers.CharField(max_length=100, required=True) # ERD có 100
+    email = serializers.EmailField(max_length=100, required=True) # ERD có 100
+
+    # --- Password Handling ---
+    # write_only=True: không bao giờ gửi về client
+    # required=False: không bắt buộc nhập khi update (trừ khi muốn đổi pass)
+    #                  khi tạo mới (POST), view sẽ cần kiểm tra và bắt buộc
+    password = serializers.CharField(
+        max_length=255,
+        write_only=True,
+        required=False, # Không bắt buộc khi PUT (chỉ nhập nếu muốn đổi)
+        style={'input_type': 'password'} # Gợi ý cho browsable API
+    )
+    # -----------------------
+
+    # --- Profile Picture Handling ---
+    profile_picture_url = serializers.SerializerMethodField(read_only=True) # Để đọc URL
+    profile_picture = serializers.FileField(write_only=True, required=False, allow_null=True) # Để nhận file upload
+    # ----------------------------
+
     date_of_birth = serializers.DateTimeField(required=False, allow_null=True)
-    # Field for receiving relative path during POST/PUT (optional, if needed for uploads)
-    profile_picture = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
-    # Assuming favorite songs are just IDs for now
-    favourite_songs = serializers.ListField(child=ObjectIdField(), required=False, default=list)
+
+    # --- Admin/Staff Status ---
+    # read_only=True: Thường chỉ admin cấp cao nhất mới đổi được quyền này
+    # Hoặc bạn có thể cho phép ghi (writeable) nếu muốn admin sửa quyền user khác
+    is_staff = serializers.BooleanField(default=False, read_only=False) # Ví dụ: Chỉ đọc
+    is_active = serializers.BooleanField(default=True, read_only=False) # Ví dụ: Chỉ đọc
+    # -------------------------
+
+    # favourite_songs = serializers.ListField(child=ObjectIdField(), required=False, default=list) # Tùy chọn
 
     def get_profile_picture_url(self, obj):
+        # Lấy từ trường 'profile_picture' (chứa path) trong document MongoDB
         return self._get_absolute_media_url(obj.get('profile_picture'))
+
+    def validate_username(self, value):
+        from .views import db # Import db từ views.py để kiểm tra kết nối
+        
+        """Kiểm tra username không trùng (khi tạo và có thể cả khi sửa)."""
+        if not db: raise serializers.ValidationError("Database error.")
+        # Lấy instance hiện tại (nếu là update) từ context hoặc self.instance
+        instance_id = self.instance.get('_id') if self.instance else None
+        query = {'username': value}
+        if instance_id:
+            query['_id'] = {'$ne': instance_id} # Loại trừ chính user đang sửa
+        if db.users.count_documents(query) > 0:
+            raise serializers.ValidationError("A user with that username already exists.")
+        return value
+
+    def validate_email(self, value):
+        """Kiểm tra email không trùng."""
+        from .views import db # Import db từ views.py để kiểm tra kết nối
+        if not db: raise serializers.ValidationError("Database error.")
+        instance_id = self.instance.get('_id') if self.instance else None
+        query = {'email': value}
+        if instance_id:
+            query['_id'] = {'$ne': instance_id}
+        if db.users.count_documents(query) > 0:
+            raise serializers.ValidationError("A user with that email already exists.")
+        return value
 
 class AdminSerializer(serializers.Serializer):
      _id = ObjectIdField(read_only=True)
@@ -118,6 +173,8 @@ class ArtistSerializer(BaseMediaURLSerializer):
     number_of_songs = serializers.IntegerField(required=False, default=0)
     number_of_plays = serializers.IntegerField(required=False, default=0)
     number_of_likes = serializers.IntegerField(required=False, default=0)
+    # --- Trường nhận file upload ---
+    artist_avatar = serializers.FileField(write_only=True, required=False, allow_null=True)
     # Assuming you write genre IDs and read them separately if needed
     musicgenre_ids = serializers.ListField(child=ObjectIdField(), required=False, default=list)
 
@@ -126,25 +183,38 @@ class ArtistSerializer(BaseMediaURLSerializer):
 
 class AlbumSerializer(BaseMediaURLSerializer):
     _id = ObjectIdField(read_only=True)
-    # For writing the relationship
-    artist_id = ObjectIdField(write_only=True)
-    # For reading the nested artist info (assuming view provides it)
-    artist = ArtistBasicSerializer(read_only=True)
-    album_name = serializers.CharField(max_length=60) # Max length from ERD
-    release_time = serializers.DateTimeField(required=False, allow_null=True) # Assuming Date, use DateTimeField if needed
-    image_url = serializers.SerializerMethodField(read_only=True) # Read-only URL field
-    # Field for receiving relative path during POST/PUT (optional)
-    image = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
-    description = serializers.CharField(max_length=255, required=False, allow_blank=True) # Max length from ERD
-    # Read-only calculated fields?
-    number_of_songs = serializers.IntegerField(required=False, read_only=True, default=0)
-    number_of_plays = serializers.IntegerField(required=False, read_only=True, default=0)
-    number_of_likes = serializers.IntegerField(required=False, read_only=True, default=0)
-    # You might want to add a list of songs here for the detail view
-    # songs = SongSerializer(many=True, read_only=True) # Example
-    
+    # --- Artist ---
+    artist_id = ObjectIdField(write_only=True, required=True) # Bắt buộc khi tạo/thay đổi artist
+    artist = ArtistBasicSerializer(read_only=True) # Hiển thị khi đọc (dữ liệu cần được view cung cấp)
+    # --------------
+    album_name = serializers.CharField(max_length=60, required=True)
+    release_time = serializers.DateTimeField(required=False, allow_null=True)
+    description = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    # --- Image ---
+    image_url = serializers.SerializerMethodField(read_only=True) # Để đọc URL
+    image = serializers.FileField(write_only=True, required=False, allow_null=True) # Để nhận file upload (dùng ImageField để có validation cơ bản)
+    # -------------
+    # Các trường read-only (thường được tính toán hoặc quản lý riêng)
+    number_of_songs = serializers.IntegerField(read_only=True, default=0)
+    number_of_plays = serializers.IntegerField(read_only=True, default=0)
+    number_of_likes = serializers.IntegerField(read_only=True, default=0)
+    # Có thể thêm trường 'songs' nếu muốn trả về danh sách bài hát trong chi tiết album
+    # songs = SongBasicSerializer(many=True, read_only=True) # Cần tạo SongBasicSerializer
+
     def get_image_url(self, obj):
+        # Lấy từ trường 'image' (chứa path tương đối) trong document MongoDB
         return self._get_absolute_media_url(obj.get('image'))
+
+    def validate_artist_id(self, value):
+        from .views import db # Import db từ views.py để kiểm tra kết nối
+        from .views import get_object # Import hàm get_object từ views.py để kiểm tra ObjectId
+        
+        """Kiểm tra xem Artist ID có tồn tại không."""
+        if not db: raise serializers.ValidationError("Database not connected.")
+        
+        if not get_object(db.artists, str(value)): # Chuyển về string để tìm
+            raise serializers.ValidationError(f"Artist with ID '{value}' does not exist.")
+        return value # Trả về ObjectId đã được convert bởi ObjectIdField
 
 class SongSerializer(BaseMediaURLSerializer):
     _id = ObjectIdField(read_only=True)
@@ -209,3 +279,8 @@ class AlbumSelectSerializer(serializers.Serializer):
     """ Trả về ID và tên Album cho dropdown select. """
     _id = ObjectIdField(read_only=True)
     album_name = serializers.CharField(read_only=True)
+    
+class MusicGenreSelectSerializer(serializers.Serializer):
+    """ Trả về ID và tên thể loại nhạc cho dropdown select. """
+    _id = ObjectIdField(read_only=True)
+    musicgenre_name = serializers.CharField(read_only=True)

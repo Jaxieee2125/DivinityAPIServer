@@ -5,10 +5,12 @@ from . import views
 urlpatterns = [
     path('artists/options/', views.ArtistSelectView.as_view(), name='artist-options'),
     path('albums/options/', views.AlbumSelectView.as_view(), name='album-options'),
+    path('musicgenres/options/', views.MusicGenreSelectView.as_view(), name='musicgenre-options'),
     path('musicgenres/', views.MusicGenreList.as_view(), name='musicgenre-list'),
     path('musicgenres/<str:pk>/', views.MusicGenreDetail.as_view(), name='musicgenre-detail'),
     path('users/', views.UserList.as_view(), name='user-list'),
     path('users/<str:pk>/', views.UserDetail.as_view(), name='user-detail'),
+    path('admin/stats/', views.AdminStatsView.as_view(), name='admin-stats'),
     path('admin/', views.AdminList.as_view(), name='admin-list'),
     path('admin/<str:pk>/', views.AdminDetail.as_view(), name = 'admin-detail'),
     path('artists/', views.ArtistList.as_view(), name='artist-list'),
