@@ -2,7 +2,11 @@
 from rest_framework import serializers
 from bson import ObjectId
 from django.conf import settings
-
+from django.core.validators import validate_email
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.contrib.auth.password_validation import validate_password # Để kiểm tra độ mạnh mật khẩu
+from django.contrib.auth.hashers import make_password                 # Để băm mật khẩu
+from datetime import datetime
 
 # from urllib.parse import urljoin # Một lựa chọn khác
 
@@ -284,3 +288,146 @@ class MusicGenreSelectSerializer(serializers.Serializer):
     """ Trả về ID và tên thể loại nhạc cho dropdown select. """
     _id = ObjectIdField(read_only=True)
     musicgenre_name = serializers.CharField(read_only=True)
+
+class UserRegistrationSerializer(serializers.Serializer):
+    """
+    Serializer xử lý dữ liệu đầu vào cho việc đăng ký user mới.
+    Validate dữ liệu và tạo bản ghi user trong MongoDB.
+    Yêu cầu 'db' phải được truyền vào context từ view.
+    """
+    username = serializers.CharField(
+        max_length=150,
+        required=True,
+        error_messages={
+            'required': 'Vui lòng nhập tên đăng nhập.',
+            'blank': 'Tên đăng nhập không được để trống.',
+        }
+    )
+    email = serializers.EmailField(
+        required=True,
+        error_messages={
+            'required': 'Vui lòng nhập địa chỉ email.',
+            'blank': 'Địa chỉ email không được để trống.',
+            'invalid': 'Địa chỉ email không hợp lệ.'
+        }
+    )
+    password = serializers.CharField(
+        write_only=True,  # Không bao giờ trả về password trong response
+        required=True,
+        style={'input_type': 'password'}, # Gợi ý cho browsable API
+        error_messages={
+            'required': 'Vui lòng nhập mật khẩu.',
+            'blank': 'Mật khẩu không được để trống.',
+        }
+        # Bạn có thể thêm validators=[...] ở đây nếu muốn validation phức tạp hơn
+    )
+
+    # --- Helper để lấy DB từ Context ---
+    def _get_db_from_context(self):
+        db = self.context.get('db')
+        if db is None:
+            print("SERIALIZER ERROR: Database object ('db') not found in serializer context.")
+            # Raise lỗi để dừng xử lý nếu không có DB
+            raise serializers.ValidationError(
+                {"system_error": "Không thể truy cập cơ sở dữ liệu để kiểm tra."}
+            )
+        return db
+
+    # --- Validation cấp độ Field ---
+    def validate_username(self, value):
+        """ Kiểm tra username đã tồn tại chưa. """
+        print(f"[Serializer validate_username] Checking username: {value}")
+        db = self._get_db_from_context()
+        if db.users.count_documents({"username": value}) > 0:
+            print(f"[Serializer validate_username] Username '{value}' already exists.")
+            raise serializers.ValidationError("Tên đăng nhập này đã được sử dụng.")
+        print(f"[Serializer validate_username] Username '{value}' is unique.")
+        return value
+
+    def validate_email(self, value):
+        """ Kiểm tra định dạng email và email đã tồn tại chưa. """
+        print(f"[Serializer validate_email] Checking email: {value}")
+        # 1. Kiểm tra định dạng cơ bản (DRF EmailField đã làm phần nào)
+        # Bạn có thể thêm kiểm tra phức tạp hơn nếu muốn.
+        # Sử dụng validator của Django để chắc chắn hơn:
+        try:
+            validate_email(value)
+        except DjangoValidationError:
+             print(f"[Serializer validate_email] Email format invalid for: {value}")
+             raise serializers.ValidationError("Địa chỉ email không hợp lệ.")
+
+        # 2. Kiểm tra tồn tại trong DB
+        db = self._get_db_from_context()
+        if db.users.count_documents({"email": value}) > 0:
+            print(f"[Serializer validate_email] Email '{value}' already exists.")
+            raise serializers.ValidationError("Địa chỉ email này đã được sử dụng.")
+        print(f"[Serializer validate_email] Email '{value}' is unique.")
+        return value
+
+    def validate_password(self, value):
+        """ Kiểm tra độ mạnh của mật khẩu bằng validators của Django. """
+        print("[Serializer validate_password] Validating password strength...")
+        try:
+            # Sử dụng các trình xác thực mật khẩu được cấu hình trong settings.AUTH_PASSWORD_VALIDATORS
+            validate_password(value)
+        except DjangoValidationError as e:
+            # Nếu mật khẩu không đạt yêu cầu, raise lỗi với danh sách các vấn đề
+            print(f"[Serializer validate_password] Password validation failed: {list(e.messages)}")
+            raise serializers.ValidationError(list(e.messages))
+        print("[Serializer validate_password] Password strength is sufficient.")
+        return value
+
+    # --- Hàm Tạo User (được gọi bởi serializer.save()) ---
+    def create(self, validated_data):
+        """
+        Tạo bản ghi user mới trong collection 'users' của MongoDB.
+        """
+        print("[Serializer create] Attempting to create new user...")
+        db = self._get_db_from_context()
+        users_collection = db.users
+
+        # Sao chép dữ liệu đã validate để tránh thay đổi dict gốc
+        user_data = validated_data.copy()
+
+        # --- Băm mật khẩu trước khi lưu ---
+        print("[Serializer create] Hashing password...")
+        user_data['password'] = make_password(user_data['password'])
+        # ------------------------------------
+
+        # --- Thêm các trường mặc định cho user mới ---
+        print("[Serializer create] Adding default fields...")
+        user_data['date_joined'] = datetime.utcnow() # Thời gian đăng ký
+        user_data['is_active'] = True                # Kích hoạt tài khoản ngay
+        user_data['is_staff'] = False                # Không phải nhân viên/admin
+        user_data['is_superuser'] = False            # Không phải superuser
+        user_data['profile_picture'] = None          # Ảnh đại diện mặc định
+        user_data['favourite_songs'] = []            # Danh sách yêu thích rỗng
+        # Thêm các trường mặc định khác nếu cần
+        # -------------------------------------------
+
+        # --- Lưu vào MongoDB ---
+        try:
+            print(f"[Serializer create] Inserting user data into MongoDB: { {k:v for k,v in user_data.items() if k != 'password'} }") # Log dữ liệu (trừ pass)
+            result = users_collection.insert_one(user_data)
+            print(f"[Serializer create] User inserted successfully. MongoDB _id: {result.inserted_id}")
+
+            # Lấy lại thông tin user vừa tạo (không bao gồm password) để trả về
+            # Điều này hữu ích để xác nhận và có thể dùng ngay _id nếu cần
+            created_user = users_collection.find_one(
+                {"_id": result.inserted_id},
+                {"password": 0} # Loại bỏ trường password khỏi kết quả trả về
+            )
+
+            # Chuyển đổi _id thành string nếu cần trả về dạng chuẩn JSON
+            if created_user and '_id' in created_user:
+                created_user['_id'] = str(created_user['_id'])
+
+            return created_user if created_user else {} # Trả về dict user hoặc dict rỗng
+
+        except Exception as e:
+             # Bắt lỗi nếu không thể ghi vào DB
+             print(f"SERIALIZER ERROR [Serializer create] Failed to insert user into MongoDB: {e}")
+             # Raise ValidationError để báo lỗi cho view xử lý (trả về 500)
+             raise serializers.ValidationError(
+                 {"database_error": "Không thể tạo tài khoản vào lúc này. Vui lòng thử lại sau."}
+             )
