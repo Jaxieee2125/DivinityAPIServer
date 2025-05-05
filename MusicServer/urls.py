@@ -23,14 +23,14 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
     TokenVerifyView, # Tùy chọn: để kiểm tra token hợp lệ
 )
-from MusicAPI.views import AdminLoginView
+# from MusicAPI.views import AdminLoginView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('MusicAPI.urls')), 
-    path('api/token/', AdminLoginView.as_view(), name='admin_token_obtain_pair'),
-    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-    path('api/token/verify/', TokenVerifyView.as_view(), name='token_verify'),
+    #path('api/token/', AdminLoginView.as_view(), name='admin_token_obtain_pair'),
+    #path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    #path('api/token/verify/', TokenVerifyView.as_view(), name='token_verify'),
 ]
 
 if settings.DEBUG:

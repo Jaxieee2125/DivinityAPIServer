@@ -8,7 +8,7 @@ from .serializers import (
     MusicGenreSerializer, UserSerializer, AdminSerializer,
     ArtistSerializer, AlbumSerializer, SongSerializer,
     PlaylistSerializer, AlbumSelectSerializer, ArtistSelectSerializer,
-    MusicGenreSelectSerializer
+    MusicGenreSelectSerializer, UserRegistrationSerializer
 )
 from pymongo import MongoClient
 from bson import ObjectId
@@ -20,6 +20,8 @@ from datetime import datetime, timedelta # Import datetime để xử lý ngày 
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
 from .permissions import IsAdminFromMongo # Import permission tùy chỉnh nếu cần
+from django.contrib.auth.hashers import check_password # Để kiểm tra mật khẩu
+from rest_framework.exceptions import ValidationError as DRFValidationError # Bắt lỗi validation
 
 
 # --- MongoDB Connection (Giả sử cấu hình ở đây hoặc import từ nơi khác) ---
@@ -147,6 +149,187 @@ class AdminStatsView(APIView):
             print(f"Error fetching admin stats: {e}")
             return Response({"error": "Could not retrieve statistics"}, 500)
 
+# --- VIEW ĐĂNG KÝ TÀI KHOẢN USER ---
+# ------------------------------------------
+class UserRegistrationView(APIView):
+    """
+    Endpoint cho phép người dùng mới đăng ký tài khoản.
+    Bất kỳ ai cũng có thể truy cập (AllowAny).
+    """
+    permission_classes = [AllowAny]     # Rất quan trọng!
+    authentication_classes = []         # Không yêu cầu xác thực cho view này
+
+    def post(self, request, *args, **kwargs):
+        print("[UserRegistrationView] Received POST request.")
+
+        if not db:
+            print("[UserRegistrationView] ERROR: Database connection is not available.")
+            return Response(
+                {"error": "Lỗi hệ thống: Không thể kết nối cơ sở dữ liệu."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # Tạo serializer, truyền request.data và context chứa db
+        serializer = UserRegistrationSerializer(data=request.data, context={'db': db})
+
+        if serializer.is_valid():
+            print("[UserRegistrationView] Serializer is valid. Attempting to save user...")
+            try:
+                # Hàm save() sẽ gọi hàm create() trong serializer
+                created_user_data = serializer.save()
+                print(f"[UserRegistrationView] User '{created_user_data.get('username')}' created successfully.")
+                # Chỉ trả về thông báo thành công, không lộ thông tin user vừa tạo
+                return Response(
+                    {"message": "Đăng ký tài khoản thành công!"},
+                    status=status.HTTP_201_CREATED
+                )
+            except DRFValidationError as e:
+                # Bắt lỗi Validation được raise từ hàm create (ví dụ: lỗi ghi DB)
+                print(f"[UserRegistrationView] ERROR during save (ValidationError): {e.detail}")
+                error_detail = e.detail if isinstance(e.detail, dict) else {"error": str(e)}
+                return Response(error_detail, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception as e:
+                 # Các lỗi không mong muốn khác trong quá trình lưu
+                 print(f"[UserRegistrationView] ERROR during save (Unexpected Exception): {e}")
+                 return Response(
+                     {"error": "Đã xảy ra lỗi không mong muốn trong quá trình đăng ký."},
+                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                 )
+        else:
+            # Dữ liệu đầu vào không hợp lệ (thiếu trường, sai định dạng, username/email đã tồn tại,...)
+            print(f"[UserRegistrationView] Serializer is invalid. Errors: {serializer.errors}")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+# ------------------------------------------
+# --- VIEW ĐĂNG NHẬP TÀI KHOẢN USER ---
+# ------------------------------------------
+class UserLoginView(APIView):
+    """
+    Endpoint cho phép người dùng thường đăng nhập bằng username/email và password.
+    Bất kỳ ai cũng có thể truy cập (AllowAny).
+    Trả về access token, refresh token và thông tin cơ bản của user.
+    """
+    permission_classes = [AllowAny]     # Rất quan trọng!
+    authentication_classes = []         # Không yêu cầu xác thực cho view này
+
+    @staticmethod
+    def _generate_tokens_for_user(user_doc):
+        """ Helper tạo JWT access và refresh tokens cho user document từ MongoDB. """
+        print(f"[_generate_tokens_for_user] Generating tokens for user: {user_doc.get('username')}")
+        try:
+            refresh = RefreshToken() # Tạo refresh token mới
+
+            # Lấy các thông tin cần thiết từ user document
+            user_id_str = str(user_doc['_id'])
+            username = user_doc.get('username')
+            is_staff = user_doc.get('is_staff', False) # Mặc định False
+            is_active = user_doc.get('is_active', True) # Mặc định True
+            email = user_doc.get('email')
+
+            # Thêm các claims (thông tin) vào payload của token
+            # Quan trọng: Chỉ thêm những thông tin không nhạy cảm và cần thiết
+            refresh['user_mongo_id'] = user_id_str # Định danh user trong DB Mongo
+
+            # Access token thường chứa nhiều thông tin hơn để kiểm tra nhanh
+            access = refresh.access_token
+            access['username'] = username
+            access['email'] = email
+            access['is_staff'] = is_staff
+            access['is_active'] = is_active
+            # Thêm các claims khác nếu cần (vd: vai trò, quyền hạn cụ thể)
+
+            print(f"[_generate_tokens_for_user] Tokens generated successfully for {username}")
+            return {'refresh': str(refresh), 'access': str(access)}
+        except Exception as e:
+            print(f"ERROR [_generate_tokens_for_user] Failed to create tokens for {user_doc.get('username', 'UNKNOWN')}: {e}")
+            # Ném lỗi ra ngoài để phương thức post xử lý và trả về lỗi 500
+            raise Exception("Token generation failed")
+
+    def post(self, request, *args, **kwargs):
+        print("[UserLoginView] Received POST request.")
+
+        if not db:
+            print("[UserLoginView] ERROR: Database connection is not available.")
+            return Response(
+                {"error": "Lỗi hệ thống: Không thể kết nối cơ sở dữ liệu."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # Lấy thông tin đăng nhập từ body của request
+        identifier = request.data.get('identifier') # Frontend sẽ gửi username hoặc email qua field này
+        password = request.data.get('password')
+
+        # Kiểm tra xem có đủ thông tin không
+        if not identifier or not password:
+            print("[UserLoginView] Missing identifier or password in request.")
+            return Response(
+                {"error": "Vui lòng cung cấp tên đăng nhập (hoặc email) và mật khẩu."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        print(f"[UserLoginView] Attempting login for identifier: '{identifier}'")
+
+        # Tìm kiếm user trong collection 'users' bằng username hoặc email
+        try:
+            users_collection = db.users
+            user_doc = users_collection.find_one({
+                '$or': [
+                    {'username': identifier},
+                    {'email': identifier}
+                ]
+            })
+        except Exception as e:
+            print(f"[UserLoginView] ERROR during database find_one: {e}")
+            return Response(
+                {"error": "Lỗi truy vấn cơ sở dữ liệu."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # --- Xử lý kết quả tìm kiếm ---
+        if user_doc:
+            print(f"[UserLoginView] User document found for identifier '{identifier}': username='{user_doc.get('username')}'")
+            stored_password_hash = user_doc.get('password') # Lấy mật khẩu đã hash từ DB
+
+            # 1. Kiểm tra mật khẩu
+            if stored_password_hash and check_password(password, stored_password_hash):
+                print(f"[UserLoginView] Password for '{identifier}' is valid.")
+
+                # 2. Kiểm tra tài khoản có active không
+                if not user_doc.get('is_active', True):
+                     print(f"[UserLoginView] Login failed - inactive user: '{identifier}'")
+                     # Trả về lỗi 401 nhưng với thông báo cụ thể hơn (tùy chọn)
+                     return Response({"detail": "Tài khoản này hiện đang bị khóa."}, status=status.HTTP_401_UNAUTHORIZED)
+
+                # 3. Mật khẩu đúng và tài khoản active -> Tạo Tokens
+                try:
+                    tokens = self._generate_tokens_for_user(user_doc)
+                    print(f"[UserLoginView] Login successful for '{identifier}'.")
+
+                    # Chuẩn bị thông tin user cơ bản để trả về (không bao gồm password)
+                    user_info = {
+                        'id': str(user_doc['_id']),
+                        'username': user_doc.get('username'),
+                        'email': user_doc.get('email'),
+                        'is_staff': user_doc.get('is_staff', False),
+                        # Thêm các trường khác nếu frontend cần (vd: tên, ảnh đại diện url...)
+                    }
+                    # Trả về tokens và thông tin user
+                    return Response({**tokens, "user": user_info}, status=status.HTTP_200_OK)
+
+                except Exception as token_e:
+                     # Bắt lỗi từ hàm _generate_tokens_for_user
+                     print(f"[UserLoginView] ERROR during token generation for '{identifier}': {token_e}")
+                     return Response({"detail": "Đã xảy ra lỗi trong quá trình tạo mã xác thực."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            else:
+                # Sai mật khẩu
+                print(f"[UserLoginView] Login failed - invalid password for: '{identifier}'")
+                # Trả về lỗi chung chung để bảo mật
+                return Response({"detail": "Tên đăng nhập hoặc mật khẩu không chính xác."}, status=status.HTTP_401_UNAUTHORIZED)
+        else:
+            # Không tìm thấy user với identifier cung cấp
+            print(f"[UserLoginView] Login failed - user not found for identifier: '{identifier}'")
+            # Trả về lỗi chung chung
+            return Response({"detail": "Tên đăng nhập hoặc mật khẩu không chính xác."}, status=status.HTTP_401_UNAUTHORIZED)
 # --- MusicGenre Views ---
 class MusicGenreList(APIView):
     def get_permissions(self):
