@@ -10,6 +10,7 @@ from .serializers import (
     PlaylistSerializer, AlbumSelectSerializer, ArtistSelectSerializer,
     MusicGenreSelectSerializer, UserRegistrationSerializer
 )
+from datetime import datetime, timezone
 from pymongo import MongoClient
 from bson import ObjectId
 from django.conf import settings # Cần cho logic media URL (mặc dù chủ yếu dùng trong serializer)
@@ -1622,85 +1623,349 @@ class SongDetail(APIView):
 
 # --- Playlist Views ---
 class PlaylistList(APIView):
-     # TODO: Add permissions (IsAuthenticated?)
+    """
+    API endpoint để lấy danh sách playlists (của user hiện tại hoặc public)
+    hoặc tạo playlist mới.
+    """
     def get_permissions(self):
-        if self.request.method == 'GET':
-            return [AllowAny()] # Ai cũng xem được list
-        # Các method khác (POST) sẽ dùng default (IsAdminFromMongo)
-        return super().get_permissions()
-    
+        if self.request.method == 'POST':
+            # Chỉ user đã đăng nhập mới được tạo playlist
+            return [IsAuthenticated()]
+        # Ai cũng có thể xem danh sách playlist (sẽ lọc sau)
+        return [AllowAny()]
+
     def get(self, request):
-        if not db: return Response({"error": "Database connection failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        # TODO: Lọc playlist theo user hiện tại? request.user.id
-        # TODO: Nếu PlaylistSerializer lồng SongSerializer, cần fetch cả song details
-        playlists = list(db.playlists.find()) # Ví dụ lấy tất cả
-        # Thêm context nếu PlaylistSerializer hoặc serializer lồng nhau cần request
-        serializer = PlaylistSerializer(playlists, many=True, context={'request': request})
-        return Response(serializer.data)
+        """ Lấy danh sách playlists. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        try:
+            # --- Xử lý Filter và Sort (Client-side cho ví dụ này, có thể làm ở backend) ---
+            # Ví dụ: Lấy tất cả public playlists và playlist của user hiện tại
+            query = {'is_public': True}
+            if request.user and request.user.is_authenticated:
+                # user_id từ token (dạng string)
+                user_id_str = getattr(request.user, 'user_mongo_id', None) or getattr(request.user, 'id', None)
+                if user_id_str:
+                    try:
+                        user_object_id = ObjectId(user_id_str)
+                        query = {'$or': [{'is_public': True}, {'user_id': user_object_id}]}
+                    except:
+                        pass # Bỏ qua nếu user_id không hợp lệ, chỉ lấy public
+
+            # TODO: Thêm $lookup để lấy tên người tạo và ảnh bìa (từ 4 track đầu)
+            # Pipeline ví dụ để lấy tên user tạo
+            pipeline = [
+                {'$match': query},
+                {'$lookup': {
+                    'from': 'users', # Collection users
+                    'localField': 'user_id',
+                    'foreignField': '_id',
+                    'as': 'user_details'
+                }},
+                {'$unwind': {'path': '$user_details', 'preserveNullAndEmptyArrays': True}},
+                # TODO: $lookup vào songs để lấy 4 ảnh bìa đầu tiên cho tracks_preview
+                {'$project': {
+                    'playlist_name': 1,
+                    'description': 1,
+                    'user_id': 1,
+                    'is_public': 1,
+                    'creation_day': 1,
+                    'songs': 1, # Giữ lại mảng songs (có thể chỉ là IDs hoặc object cơ bản)
+                    'user': { # Chỉ lấy username
+                        '$cond': {
+                            'if': '$user_details',
+                            'then': {'_id': '$user_details._id', 'username': '$user_details.username'},
+                            'else': None
+                        }
+                    },
+                    'image_url': 1, # Nếu bạn lưu ảnh bìa riêng cho playlist
+                    
+                }},
+                {'$sort': {'creation_day': -1}} # Ví dụ sort theo ngày tạo mới nhất
+            ]
+
+            playlists_list = list(db.playlists.aggregate(pipeline))
+            # ------------------------------------------------------------
+
+            serializer = PlaylistSerializer(playlists_list, many=True, context={'request': request})
+            return Response(serializer.data) # API của bạn có thể trả về { "results": serializer.data } nếu có pagination
+
+        except Exception as e:
+            print(f"[GET /playlists/] Error: {e}")
+            return Response({"error": "Could not retrieve playlists"}, 500)
 
     def post(self, request):
-        # TODO: Add permissions (IsAuthenticated?)
-        if not db: return Response({"error": "Database connection failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        # Thêm context nếu cần trong quá trình validate hoặc trả về response
-        serializer = PlaylistSerializer(data=request.data, context={'request': request})
+        """ User tạo playlist mới. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+
+        # --- QUAN TRỌNG: Yêu cầu đăng nhập ---
+        if not request.user or not request.user.is_authenticated:
+            return Response({"error": "Authentication required to create a playlist."}, status=status.HTTP_401_UNAUTHORIZED)
+        # ------------------------------------
+
+        # Lấy user_id từ token JWT (dạng string)
+        user_id_str = getattr(request.user, 'user_mongo_id', None) or getattr(request.user, 'id', None)
+
+        if not user_id_str:
+            # Lỗi này không nên xảy ra nếu IsAuthenticated hoạt động đúng
+            return Response({"error": "User ID not found in token."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user_object_id = ObjectId(user_id_str)
+        except Exception:
+            return Response({"error": "Invalid user ID format in token."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Chuẩn bị dữ liệu từ request body
+        data_for_serializer = request.data.copy() # request.data là JSON
+
+        # --- GÁN USER_ID VÀ CREATION_DAY Ở BACKEND ---
+        data_for_serializer['user_id'] = user_object_id # Gán ObjectId
+        data_for_serializer['creation_day'] = datetime.now(timezone.utc) # Thời gian hiện tại UTC
+        # Mảng songs có thể rỗng khi tạo, serializer nên có default=[]
+        if 'songs' not in data_for_serializer or not isinstance(data_for_serializer.get('songs'), list):
+            data_for_serializer['songs'] = []
+        # ---------------------------------------------
+        serializer = PlaylistSerializer(data=data_for_serializer, context={'request': request})
         if serializer.is_valid():
-            playlist_data = serializer.validated_data
-            # TODO: Gán user_id = request.user.id
-            # TODO: Validate song_ids/songs trong playlist nếu cần
-            result = db.playlists.insert_one(playlist_data)
-            created_playlist = db.playlists.find_one({'_id': result.inserted_id})
-            if created_playlist:
-                 # Thêm context nếu cần khi trả về
-                 response_serializer = PlaylistSerializer(created_playlist, context={'request': request})
-                 return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-            return Response({"error": "Could not retrieve created playlist"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            playlist_data_to_save = serializer.validated_data
+            playlist_data_to_save['user_id'] = user_object_id # Gán ObjectId
+            playlist_data_to_save['creation_day'] = datetime.now(timezone.utc) # Thời gian hiện tại UTC
+            # `user_id` và `creation_day` đã nằm trong `validated_data`
+            # `songs` cũng đã được validate bởi serializer
+
+            try:
+                insert_result = db.playlists.insert_one(playlist_data_to_save)
+                new_playlist_id = insert_result.inserted_id
+
+                # Fetch lại playlist vừa tạo (có thể cần $lookup user)
+                # Giả sử pipeline đã được định nghĩa ở get() hoặc là static method
+                pipeline_detail = [
+                    {'$match': {'_id': new_playlist_id}}
+                ] + (PlaylistList._get_pipeline_stages_for_list() if hasattr(PlaylistList, '_get_pipeline_stages_for_list') else []) # Tái sử dụng pipeline nếu có
+
+                created_playlist_agg = list(db.playlists.aggregate(pipeline_detail))
+
+                if created_playlist_agg:
+                    response_serializer = PlaylistSerializer(created_playlist_agg[0], context={'request': request})
+                    return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+                else:
+                    # Fallback nếu aggregation không trả về gì (hiếm)
+                    fallback_doc = db.playlists.find_one({'_id': new_playlist_id})
+                    if fallback_doc:
+                         user_info = get_object(db.users, str(fallback_doc.get('user_id')))
+                         fallback_doc['user'] = {'_id': user_info['_id'], 'username': user_info.get('username')} if user_info else None
+                         response_serializer = PlaylistSerializer(fallback_doc, context={'request': request})
+                         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+                    raise Exception("Could not retrieve created playlist after insert.")
+
+            except Exception as e:
+                print(f"[POST Playlist] Error saving: {e}")
+                # Nếu đã insert_one mà lỗi sau đó, cần xem xét xóa bản ghi đã tạo
+                # (Logic này có thể phức tạp hơn nếu có nhiều bước sau insert_one)
+                return Response({"error": f"Could not create playlist: {e}"}, status=500)
+        else:
+            print("[POST Playlist] Serializer Errors:", serializer.errors)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class PlaylistDetail(APIView):
-    # TODO: Add permissions (IsAuthenticated and IsOwnerOrPublic?)
+    """
+    API endpoint để lấy, sửa, xóa một playlist cụ thể.
+    Sẽ trả về cả danh sách bài hát chi tiết trong playlist.
+    """
+    _get_song_pipeline_stages = staticmethod(get_song_aggregation_pipeline) # Tái sử dụng
+
     def get_permissions(self):
+        # Ai cũng có thể xem playlist public, hoặc chủ sở hữu xem playlist private
+        # Sửa/Xóa chỉ chủ sở hữu hoặc Admin
         if self.request.method == 'GET':
-            return [AllowAny()] # Ai cũng xem được list
-        # Các method khác (POST) sẽ dùng default (IsAdminFromMongo)
-        return super().get_permissions()
-    
+            return [AllowAny()] # Logic kiểm tra public/owner sẽ ở trong hàm get
+        # TODO: Cần tạo permission IsOwnerOrAdminOrReadOnly
+        return [IsAuthenticated()] # Cho PUT/DELETE, cần kiểm tra owner/admin
+
     def get(self, request, pk):
-        # TODO: Fetch playlist và có thể cả chi tiết bài hát lồng nhau
-        playlist = get_object(db.playlists, pk)
-        if playlist:
-             # TODO: Check permission xem user có được xem playlist này không
-             # Thêm context nếu cần
-             serializer = PlaylistSerializer(playlist, context={'request': request})
-             return Response(serializer.data)
-        return Response(status=status.HTTP_404_NOT_FOUND)
+        """ Lấy chi tiết playlist, bao gồm cả danh sách bài hát chi tiết. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        playlist_id = None
+        try: playlist_id = ObjectId(pk)
+        except Exception: return Response({"error": "Invalid Playlist ID format"}, 400)
+
+        try:
+            # --- Pipeline để lấy chi tiết playlist và lồng user ---
+            playlist_pipeline = [
+                {'$match': {'_id': playlist_id}},
+                {'$lookup': {
+                    'from': 'users',
+                    'localField': 'user_id',
+                    'foreignField': '_id',
+                    'as': 'user_details'
+                }},
+                {'$unwind': {'path': '$user_details', 'preserveNullAndEmptyArrays': True}},
+                {'$project': {
+                    'playlist_name': 1, 'description': 1, 'user_id': 1, 'is_public': 1,
+                    'creation_day': 1, 'songs': 1, 'image_url': 1, # Giữ lại mảng songs (thường là object {song_id, date_added})
+                    'user': { '$cond': { 'if': '$user_details', 'then': {'_id': '$user_details._id', 'username': '$user_details.username'}, 'else': None }}
+                }}
+            ]
+            playlist_agg_result = list(db.playlists.aggregate(playlist_pipeline))
+            # ----------------------------------------------------------
+
+            if not playlist_agg_result:
+                return Response({"error": "Playlist not found"}, status=status.HTTP_404_NOT_FOUND)
+
+            playlist_data = playlist_agg_result[0]
+
+            # --- Kiểm tra quyền xem playlist (nếu không public) ---
+            user_id_str_from_token = getattr(request.user, 'user_mongo_id', None) or getattr(request.user, 'id', None)
+            is_owner = False
+            if user_id_str_from_token:
+                try:
+                    is_owner = ObjectId(user_id_str_from_token) == playlist_data.get('user_id')
+                except: pass
+
+            if not playlist_data.get('is_public', False) and not is_owner and not IsAdminFromMongo().has_permission(request, self):
+                 return Response({"error": "You do not have permission to view this playlist."}, status=status.HTTP_403_FORBIDDEN)
+            # ----------------------------------------------------
+
+            song_items_from_playlist = playlist_data.get('songs', []) # Đây là mảng [{song_id, date_added}, ...]
+            song_ids_to_fetch = []
+            # Tạo một map để lưu date_added theo song_id
+            song_date_map = {}
+
+            for item in song_items_from_playlist:
+                if isinstance(item, dict) and item.get('song_id') and ObjectId.is_valid(item.get('song_id')):
+                    song_id_obj = ObjectId(item.get('song_id'))
+                    song_ids_to_fetch.append(song_id_obj)
+                    song_date_map[str(song_id_obj)] = item.get('date') # Lưu date_added
+                # Xử lý trường hợp 'songs' chỉ là mảng ID (nếu có)
+                elif ObjectId.is_valid(item):
+                    song_id_obj = ObjectId(item)
+                    song_ids_to_fetch.append(song_id_obj)
+                    song_date_map[str(song_id_obj)] = None # Không có date_added
+
+            detailed_songs_for_playlist = []
+            if song_ids_to_fetch:
+                # Dùng aggregation để lấy chi tiết các bài hát này
+                song_match_stage = {'$match': {'_id': {'$in': song_ids_to_fetch}}}
+                song_pipeline = [song_match_stage] + self._get_song_pipeline_stages() # Tái sử dụng pipeline
+                songs_from_db = list(db.songs.aggregate(song_pipeline))
+
+                # Tạo map để dễ truy cập chi tiết bài hát
+                songs_db_map = {str(s['_id']): s for s in songs_from_db}
+
+                # Tạo lại mảng songs cho playlist_data theo đúng thứ tự và cấu trúc
+                for song_id_obj in song_ids_to_fetch: # Lặp qua ID gốc để giữ thứ tự
+                    song_detail = songs_db_map.get(str(song_id_obj))
+                    if song_detail:
+                        detailed_songs_for_playlist.append({
+                            'song': song_detail, # <<< Object song đầy đủ
+                            'date_added': song_date_map.get(str(song_id_obj)) # <<< Thêm date_added
+                        })
+            # --------------------------------------------
+
+            playlist_data['songs'] = detailed_songs_for_playlist # Gán lại mảng songs đã xử lý
+
+            serializer = PlaylistSerializer(playlist_data, context={'request': request})
+            return Response(serializer.data)
+
+        except Exception as e:
+            print(f"[GET /playlists/{pk}] Error: {e}")
+            return Response({"error": f"Could not retrieve playlist {pk}"}, 500)
 
     def put(self, request, pk):
-        # TODO: Add permissions (IsAuthenticated and IsOwner?)
+        """ Sửa playlist (tên, mô tả, is_public, danh sách bài hát). """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        playlist_id = None
+        try: playlist_id = ObjectId(pk)
+        except Exception: return Response({"error": "Invalid Playlist ID format"}, 400)
+
         playlist = get_object(db.playlists, pk)
-        if playlist:
-             # TODO: Check permission
-             # Thêm context nếu cần
-            serializer = PlaylistSerializer(playlist, data=request.data, partial=True, context={'request': request})
-            if serializer.is_valid():
-                # TODO: Validate songs/song_ids nếu có thay đổi
-                update_data = serializer.validated_data
-                db.playlists.update_one({'_id': ObjectId(pk)}, {'$set': update_data})
-                updated_playlist = get_object(db.playlists, pk)
-                if updated_playlist:
-                    # Thêm context nếu cần
-                    response_serializer = PlaylistSerializer(updated_playlist, context={'request': request})
-                    return Response(response_serializer.data)
-                return Response(status=status.HTTP_404_NOT_FOUND)
+        if not playlist: return Response(status=status.HTTP_404_NOT_FOUND)
+
+        # --- Kiểm tra quyền sửa ---
+        user_id_str_from_token = getattr(request.user, 'user_mongo_id', None) or getattr(request.user, 'id', None)
+        is_owner = False
+        if user_id_str_from_token:
+             try: is_owner = ObjectId(user_id_str_from_token) == playlist.get('user_id')
+             except: pass
+
+        if not is_owner and not IsAdminFromMongo().has_permission(request, self):
+            return Response({"error": "You do not have permission to edit this playlist."}, status=status.HTTP_403_FORBIDDEN)
+        # ------------------------
+
+        serializer = PlaylistSerializer(playlist, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            update_data = serializer.validated_data
+            # Serializer đã validate cấu trúc của mảng 'songs' nếu được gửi
+            # Không cần hash password hay xử lý file ở đây
+
+            try:
+                db.playlists.update_one({'_id': playlist_id}, {'$set': update_data})
+                # Fetch lại để trả về (tương tự logic GET)
+                pipeline_detail = [{'$match': {'_id': playlist_id}}] + PlaylistList.get_aggregation_pipeline_for_playlist_detail() # Cần hàm helper này
+                updated_playlist_agg = list(db.playlists.aggregate(pipeline_detail))
+
+                if updated_playlist_agg:
+                     # Cần fetch lại song details cho playlist này
+                     # ... (Logic fetch song details như trong GET) ...
+                     # Tạm thời serialize lại dữ liệu thô đã update
+                     response_serializer = PlaylistSerializer(updated_playlist_agg[0], context={'request': request})
+                     return Response(response_serializer.data)
+                else: return Response(status=status.HTTP_404_NOT_FOUND)
+
+            except Exception as e:
+                 print(f"[PUT Playlist/{pk}] Error: {e}")
+                 return Response({"error": f"Could not update playlist {pk}: {e}"}, status=500)
+        else:
+            print(f"[PUT Playlist/{pk}] Serializer Errors:", serializer.errors)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        return Response(status=status.HTTP_404_NOT_FOUND)
+
 
     def delete(self, request, pk):
-        # TODO: Add permissions (IsAuthenticated and IsOwner?)
-        result = db.playlists.delete_one({'_id': ObjectId(pk)})
-        if result.deleted_count == 1:
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        return Response(status=status.HTTP_404_NOT_FOUND)
+        """ Xóa playlist. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        playlist_id = None
+        try: playlist_id = ObjectId(pk)
+        except Exception: return Response({"error": "Invalid Playlist ID format"}, 400)
+
+        playlist = get_object(db.playlists, pk)
+        if not playlist: return Response(status=status.HTTP_404_NOT_FOUND)
+
+        # --- Kiểm tra quyền xóa ---
+        user_id_str_from_token = getattr(request.user, 'user_mongo_id', None) or getattr(request.user, 'id', None)
+        is_owner = False
+        if user_id_str_from_token:
+            try: is_owner = ObjectId(user_id_str_from_token) == playlist.get('user_id')
+            except: pass
+
+        if not is_owner and not IsAdminFromMongo().has_permission(request, self):
+            return Response({"error": "You do not have permission to delete this playlist."}, status=status.HTTP_403_FORBIDDEN)
+        # -----------------------
+
+        try:
+            result = db.playlists.delete_one({'_id': playlist_id})
+            if result.deleted_count == 1:
+                return Response(status=status.HTTP_204_NO_CONTENT)
+            else: return Response({"error": f"Could not delete playlist {pk} from DB"}, status=500)
+        except Exception as e:
+             print(f"[DELETE Playlist/{pk}] Error: {e}")
+             return Response({"error": f"Could not complete playlist deletion for {pk}"}, status=500)
+
+
+# --- Helper pipeline cho PlaylistList và PlaylistDetail để lấy user lồng nhau ---
+# Có thể đặt làm static method hoặc hàm riêng
+def get_playlist_aggregation_pipeline_with_user():
+     return [
+        {'$lookup': { 'from': 'users', 'localField': 'user_id', 'foreignField': '_id', 'as': 'user_details' }},
+        {'$unwind': {'path': '$user_details', 'preserveNullAndEmptyArrays': True}},
+        {'$project': {
+            'playlist_name': 1, 'description': 1, 'user_id': 1, 'is_public': 1,
+            'creation_day': 1, 'songs': 1, 'image_url': 1,
+            'user': { '$cond': { 'if': '$user_details', 'then': {'_id': '$user_details._id', 'username': '$user_details.username'}, 'else': None }}
+            # TODO: Thêm logic lấy 4 ảnh bìa đầu tiên cho tracks_preview nếu cần cho PlaylistList
+        }}
+     ]
+     
+PlaylistList.get_aggregation_pipeline_for_playlist_detail = staticmethod(get_playlist_aggregation_pipeline_with_user)
 
 class SearchView(APIView):
     def get_permissions(self):

@@ -256,25 +256,40 @@ class SongSerializer(BaseMediaURLSerializer):
         # Assumes the relative path is stored in the 'file_up' key in the MongoDB document
         return self._get_absolute_media_url(obj.get('file_up'))
 
-class PlaylistSongSerializer(serializers.Serializer): # Example if you need details in playlist songs
-    song_id = ObjectIdField()
-    # You could add more song details here if needed by fetching/nesting
-    # song_name = serializers.CharField(read_only=True) # Example
-    date = serializers.DateTimeField() # From ERD
+class PlaylistSongSerializer(serializers.Serializer): # Hoặc kế thừa SongBasicSerializer
+    # Nếu bạn muốn trả về chi tiết bài hát đầy đủ trong playlist
+    song = SongSerializer(read_only=True) # <<< Trả về object Song đã được $lookup
+    date = serializers.DateTimeField(source='date_added', read_only=True, required=False, allow_null=True) # <<< Lấy từ 'date_added'
 
-class PlaylistSerializer(serializers.Serializer):
+class PlaylistSerializer(BaseMediaURLSerializer): # Kế thừa nếu có media URL trong playlist
     _id = ObjectIdField(read_only=True)
-    user_id = ObjectIdField() # Assuming created by a user
+    user_id = ObjectIdField(read_only=True) # Thường read_only khi GET
+    user = serializers.SerializerMethodField(read_only=True) # Để hiển thị username
     playlist_name = serializers.CharField(max_length=255)
     description = serializers.CharField(max_length=255, required=False, allow_blank=True)
-    # number_of_songs = serializers.IntegerField(read_only=True) # Often calculated dynamically
-    creation_day = serializers.DateTimeField(required=False) # From ERD
+    creation_day = serializers.DateTimeField(read_only=True) # Thường read_only
     is_public = serializers.BooleanField(default=True)
-    # Depending on how you store/retrieve songs for a playlist
-    # Option 1: List of ObjectIDs
-    # song_ids = serializers.ListField(child=ObjectIdField(), required=False, default=list)
-    # Option 2: List of embedded song details (use PlaylistSongSerializer or similar)
-    songs = PlaylistSongSerializer(many=True, required=False, default=list) # Matches ERD more closely
+    image_url = serializers.SerializerMethodField(read_only=True) # Nếu có ảnh bìa riêng cho playlist
+
+    # --- SỬA Ở ĐÂY ---
+    # 'songs' bây giờ sẽ là list các object {'song': <song_detail_obj>, 'date_added': <date>}
+    # được chuẩn bị bởi view
+    songs = PlaylistSongSerializer(many=True, read_only=True, required=False)
+    # -----------------
+
+    def get_user(self, obj):
+        user_data = obj.get('user') # Lấy từ dữ liệu đã $lookup bởi view
+        if user_data and user_data.get('username'):
+            return {'username': user_data.get('username'), '_id': str(user_data.get('_id'))}
+        return None
+
+    def get_image_url(self, obj):
+        # Logic lấy image_url (từ trường riêng hoặc từ track preview)
+        # Giả sử có trường 'image_url' hoặc 'tracks_preview' trong obj
+        if obj.get('image_url'):
+            return self._get_absolute_media_url(obj.get('image_url'))
+        # Logic lấy từ tracks_preview nếu cần
+        return None
     
 class ArtistSelectSerializer(serializers.Serializer):
     """ Trả về ID và tên Artist cho dropdown select. """
