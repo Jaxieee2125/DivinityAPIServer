@@ -174,6 +174,8 @@ class ArtistSerializer(BaseMediaURLSerializer):
     artist_avatar = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
     social_media = serializers.CharField(max_length=255, required=False, allow_blank=True)
     # These might be calculated fields, consider making them read_only or removing if managed elsewhere
+    total_albums = serializers.IntegerField(read_only=True, default=0)
+    total_tracks = serializers.IntegerField(read_only=True, default=0)
     number_of_songs = serializers.IntegerField(required=False, default=0)
     number_of_plays = serializers.IntegerField(required=False, default=0)
     number_of_likes = serializers.IntegerField(required=False, default=0)
@@ -431,3 +433,4 @@ class UserRegistrationSerializer(serializers.Serializer):
              raise serializers.ValidationError(
                  {"database_error": "Không thể tạo tài khoản vào lúc này. Vui lòng thử lại sau."}
              )
+
