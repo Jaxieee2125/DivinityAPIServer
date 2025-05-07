@@ -25,6 +25,15 @@ from django.contrib.auth.hashers import check_password # Để kiểm tra mật 
 from rest_framework.exceptions import ValidationError as DRFValidationError # Bắt lỗi validation
 from math import ceil
 import random
+import os
+import mimetypes # Để đoán content type
+from wsgiref.util import FileWrapper # Để stream file hiệu quả
+from django.http import HttpResponse, StreamingHttpResponse, Http404, HttpResponseNotModified, HttpResponseForbidden, HttpResponseServerError
+from django.conf import settings
+from django.utils.http import http_date, parse_etags, quote_etag
+from django.utils.encoding import escape_uri_path
+import stat # Để lấy thông tin file
+import re
 
 
 # --- MongoDB Connection (Giả sử cấu hình ở đây hoặc import từ nơi khác) ---
@@ -2435,3 +2444,97 @@ class RecentlyAddedReleasesView(APIView):
         except Exception as e:
             print(f"Error fetching new releases: {e}")
             return Response({"error": "Could not retrieve new releases"}, 500)
+        
+def serve_media_with_range(request, path):
+    """
+    View tùy chỉnh để phục vụ file media có hỗ trợ Range Requests và no-cache.
+    """
+    fullpath = os.path.join(settings.MEDIA_ROOT, path)
+    if not os.path.abspath(fullpath).startswith(os.path.abspath(settings.MEDIA_ROOT)) or not os.path.exists(fullpath):
+         raise Http404('"%(path)s" does not exist' % {"path": fullpath})
+    if os.path.isdir(fullpath):
+         raise Http404('"%(path)s" is a directory' % {"path": fullpath})
+
+    try:
+        statobj = os.stat(fullpath)
+    except OSError:
+         raise Http404("File not found or permissions error reading file stats.")
+
+    range_header = request.META.get('HTTP_RANGE', '').strip()
+    range_match = re.match(r'bytes=(\d+)-(\d*)', range_header)
+    size = statobj.st_size
+    content_type, encoding = mimetypes.guess_type(fullpath)
+    content_type = content_type or 'application/octet-stream'
+    response = None
+    file_handle = None # Khởi tạo để có thể đóng trong finally nếu cần
+
+    try: # Thêm try...finally để đảm bảo file được đóng
+        if range_match:
+            first_byte, last_byte = range_match.groups()
+            first_byte = int(first_byte) if first_byte else 0
+            last_byte = int(last_byte) if last_byte else size - 1
+            if last_byte >= size: last_byte = size - 1
+            length = last_byte - first_byte + 1
+            if first_byte >= size or length <= 0:
+                response = HttpResponse(status=416)
+                response["Content-Range"] = f"bytes */{size}"
+                # Vẫn thêm header no-cache cho lỗi
+                response['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+                response['Pragma'] = 'no-cache'
+                response['Expires'] = '0'
+                return response
+
+            # Mở file handle
+            file_handle = open(fullpath, 'rb')
+            file_handle.seek(first_byte)
+
+            # Tạo StreamingHttpResponse với iterator đọc theo chunk
+            # Chỉ đọc đúng số byte cần thiết
+            def file_iterator(file_handle, chunk_size=8192, bytes_to_read=length):
+                 bytes_read = 0
+                 while bytes_read < bytes_to_read:
+                     read_size = min(chunk_size, bytes_to_read - bytes_read)
+                     chunk = file_handle.read(read_size)
+                     if not chunk:
+                         break # Hết file sớm hơn dự kiến?
+                     bytes_read += len(chunk)
+                     yield chunk
+                 # Đóng file handle sau khi đọc xong iterator (quan trọng)
+                 file_handle.close()
+
+            response = StreamingHttpResponse(file_iterator(file_handle), content_type=content_type, status=206)
+            response["Content-Length"] = str(length)
+            response["Content-Range"] = f"bytes {first_byte}-{last_byte}/{size}"
+            # --- KHÔNG CẦN DÒNG NÀY ---
+            # response.file_to_stream = file_handle
+            # --------------------------
+
+        else:
+            # Không có Range header, trả về toàn bộ file bằng StreamingHttpResponse
+            file_handle = open(fullpath, 'rb')
+            # Dùng FileWrapper sẽ tự đóng file khi response kết thúc
+            response = StreamingHttpResponse(FileWrapper(file_handle, 8192), content_type=content_type)
+            response["Content-Length"] = str(size)
+            # --- KHÔNG CẦN DÒNG NÀY ---
+            # response.file_to_stream = file_handle
+            # --------------------------
+
+        # --- Thêm các Headers (No-Cache, Last-Modified, Accept-Ranges) ---
+        response['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response['Pragma'] = 'no-cache'
+        response['Expires'] = '0'
+        response["Last-Modified"] = http_date(statobj.st_mtime)
+        response["Accept-Ranges"] = "bytes"
+        # --------------------------------------------------------------
+
+        return response
+
+    except Exception as e:
+        print(f"Error serving media file {path}: {e}")
+        # Đảm bảo đóng file nếu có lỗi xảy ra trước khi response được tạo
+        if file_handle and not file_handle.closed:
+             file_handle.close()
+             print(f"Closed file handle for {path} due to exception.")
+        # Có thể raise Http404 hoặc trả về lỗi server tùy tình huống
+        # raise Http404("Error processing file.")
+        return HttpResponseServerError("Error processing media file.")

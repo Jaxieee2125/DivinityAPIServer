@@ -48,14 +48,13 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware', # Giữ lại cho Django Admin UI
+    'corsheaders.middleware.CorsMiddleware',          # <<< Đặt ở đây
+    'django.middleware.common.CommonMiddleware',      # <<< Chỉ một dòng
+    'django.middleware.csrf.CsrfViewMiddleware',      # <<< Giữ lại nếu dùng Session/Admin UI, bỏ nếu API hoàn toàn stateless
+    'django.contrib.auth.middleware.AuthenticationMiddleware', # Giữ lại cho Django Admin UI và request.user
+    'django.contrib.messages.middleware.MessageMiddleware', # Giữ lại cho Django Admin UI
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
-    'django.middleware.common.CommonMiddleware',
 ]
 
 ROOT_URLCONF = 'MusicServer.urls'
