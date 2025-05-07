@@ -7,6 +7,8 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
     TokenVerifyView,
 )
+from django.conf import settings
+from django.conf.urls.static import static
 
 urlpatterns = [
     # --- Authentication & User Management URLs ---
@@ -55,3 +57,7 @@ urlpatterns = [
     path('home/library-highlights/', views.LibraryHighlightsView.as_view(), name='home-library-highlights'),
     path('home/new-releases/', views.RecentlyAddedReleasesView.as_view(), name='home-new-releases'),
 ]
+
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
