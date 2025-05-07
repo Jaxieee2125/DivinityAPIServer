@@ -22,6 +22,8 @@ from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
 from .permissions import IsAdminFromMongo # Import permission tùy chỉnh nếu cần
 from django.contrib.auth.hashers import check_password # Để kiểm tra mật khẩu
 from rest_framework.exceptions import ValidationError as DRFValidationError # Bắt lỗi validation
+from math import ceil
+import random
 
 
 # --- MongoDB Connection (Giả sử cấu hình ở đây hoặc import từ nơi khác) ---
@@ -339,11 +341,47 @@ class MusicGenreList(APIView):
         return super().get_permissions()
     
     def get(self, request):
-        if not db: return Response({"error": "Database connection failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        genres = list(db.musicgenres.find())
-        # Không cần context vì MusicGenreSerializer không xử lý media URL
-        serializer = MusicGenreSerializer(genres, many=True)
-        return Response(serializer.data)
+        if not db: return Response({"error": "Database connection failed"}, 500)
+
+        query_params = request.query_params
+        mongo_filter = {}
+
+        # --- KIỂM TRA LOGIC LỌC THEO _id ---
+        genre_id_param = query_params.get('_id')
+        if genre_id_param:
+            try:
+                mongo_filter['_id'] = ObjectId(genre_id_param)
+                print(f"Filtering musicgenres by _id: {mongo_filter['_id']}") # DEBUG
+            except Exception:
+                return Response({"error": f"Invalid _id format: {genre_id_param}"}, status=400)
+        # ---------------------------------
+
+        # Sắp xếp nếu có
+        sort_field = query_params.get('sort', 'musicgenre_name')
+        sort_order_str = query_params.get('order', 'asc').lower()
+        sort_order = 1 if sort_order_str == 'asc' else -1
+
+        try:
+            # Áp dụng filter và sort
+            genres_cursor = db.musicgenres.find(mongo_filter).sort(sort_field, sort_order)
+            # Nếu dùng pagination, cần thêm limit, skip và count
+            genres_list = list(genres_cursor)
+
+            # Nếu đây là request chỉ lấy 1 genre theo ID, trả về object thay vì mảng
+            if genre_id_param and len(genres_list) == 1:
+                 serializer = MusicGenreSerializer(genres_list[0], context={'request': request})
+                 return Response(serializer.data) # Trả về object
+            elif genre_id_param and not genres_list:
+                 return Response({"detail": "Not found."}, status=404)
+
+
+            # Mặc định trả về list cho /api/musicgenres/ (không có _id param)
+            serializer = MusicGenreSerializer(genres_list, many=True, context={'request': request})
+            # Cần cấu trúc response có "results" nếu frontend dùng pagination
+            return Response({"results": serializer.data, "count": len(genres_list)})
+        except Exception as e:
+            print(f"Error fetching music genres: {e}")
+            return Response({"error": "Could not retrieve music genres"}, status=500)
 
     def post(self, request):
         if not db: return Response({"error": "Database connection failed"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -770,19 +808,49 @@ class ArtistList(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class ArtistDetail(APIView):
-    def get_permissions(self):
-        if self.request.method == 'GET':
-            return [AllowAny()] # Ai cũng xem được list
-        # Các method khác (POST) sẽ dùng default (IsAdminFromMongo)
-        return super().get_permissions()
-    
+    permission_classes = [AllowAny] # Ai cũng có thể xem chi tiết nghệ sĩ
+
     def get(self, request, pk):
-        artist = get_object(db.artists, pk)
-        if artist:
-            # TODO: Cần lấy thêm albums/songs của artist để trả về nếu serializer yêu cầu
-            serializer = ArtistSerializer(artist, context={'request': request}) # Thêm context
+        """ Lấy chi tiết nghệ sĩ, có thể kèm thông tin tổng hợp. """
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        artist_id = None
+        try:
+            artist_id = ObjectId(pk)
+        except Exception:
+            return Response({"error": "Invalid Artist ID format"}, status=400)
+
+        try:
+            artist = db.artists.find_one({'_id': artist_id})
+            if not artist:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+
+            # --- Tính toán thông tin tổng hợp (Ví dụ) ---
+            # Cách 1: Đếm trực tiếp (Có thể chậm nếu dữ liệu lớn)
+            total_albums = db.albums.count_documents({'artist_id': artist_id})
+            total_tracks = db.songs.count_documents({'artist_ids': artist_id}) # Tìm trong mảng artist_ids
+
+            # Cách 2: Dùng Aggregation để tính tổng lượt nghe (Hiệu quả hơn nếu cần tính tổng)
+            # pipeline_plays = [
+            #     {'$match': {'artist_ids': artist_id}},
+            #     {'$group': {'_id': None, 'total_plays': {'$sum': '$number_of_plays'}}}
+            # ]
+            # play_result = list(db.songs.aggregate(pipeline_plays))
+            # total_plays = play_result[0]['total_plays'] if play_result else 0
+
+            # Gán các giá trị tính toán vào dict để serializer có thể dùng (nếu cần)
+            # Hoặc serializer tự xử lý các trường read_only này
+            artist['total_albums'] = total_albums
+            artist['total_tracks'] = total_tracks
+            # artist['total_plays'] = total_plays # Nếu tính
+            # -----------------------------------------
+
+            # Truyền context để tạo URL avatar
+            serializer = ArtistSerializer(artist, context={'request': request})
             return Response(serializer.data)
-        return Response(status=status.HTTP_404_NOT_FOUND)
+
+        except Exception as e:
+            print(f"[GET /artists/{pk}] Error: {e}")
+            return Response({"error": f"Could not retrieve artist {pk}"}, 500)
 
     def put(self, request, pk):
         """ Cập nhật thông tin nghệ sĩ, bao gồm cả avatar. """
@@ -1755,3 +1823,350 @@ class MusicGenreSelectView(APIView):
         except Exception as e:
             print(f"Error fetching music genre options: {e}")
             return Response({"error": "Could not retrieve music genre options"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+class AlbumSongsView(APIView):
+    """ Lấy danh sách bài hát thuộc một album cụ thể. """
+    permission_classes = [AllowAny] # Ai cũng có thể lấy bài hát của album
+
+    # Gán lại hàm helper nếu cần
+    _get_pipeline_stages = staticmethod(get_song_aggregation_pipeline)
+
+    def get(self, request, pk): # pk ở đây là Album ID
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        album_id = None
+        try:
+            album_id = ObjectId(pk)
+        except Exception:
+             return Response({"error": "Invalid Album ID format"}, status=400)
+
+        # Kiểm tra xem album có tồn tại không (tùy chọn)
+        # album_exists = db.albums.count_documents({'_id': album_id}, limit=1) > 0
+        # if not album_exists:
+        #     return Response({"error": "Album not found"}, status=404)
+
+        try:
+            # --- Tìm tất cả bài hát có album_id khớp ---
+            # Sử dụng aggregation để lấy cả thông tin artist/album lồng nhau cho các bài hát này
+            match_stage = {'$match': {'album_id': album_id}}
+            sort_stage = {'$sort': {'track_number': 1, 'song_name': 1}} # Sắp xếp theo số track (nếu có) hoặc tên
+            pipeline = [match_stage] + self._get_pipeline_stages() + [sort_stage]
+
+            album_songs = list(db.songs.aggregate(pipeline))
+            # ----------------------------------------------
+
+            # Serialize danh sách bài hát
+            # Lưu ý: SongSerializer đã có sẵn logic tạo file_url nếu context được truyền
+            serializer = SongSerializer(album_songs, many=True, context={'request': request})
+            return Response(serializer.data) # Trả về mảng các bài hát
+
+        except Exception as e:
+            print(f"Error fetching songs for album {pk}: {e}")
+            return Response({"error": f"Could not retrieve songs for album {pk}"}, 500)
+        
+class ArtistAlbumsView(APIView):
+    """ Lấy danh sách albums của một nghệ sĩ cụ thể. """
+    permission_classes = [AllowAny] # Ai cũng có thể xem album của nghệ sĩ
+    _get_album_pipeline = staticmethod(get_album_aggregation_pipeline) # Nếu dùng chung
+
+    def get(self, request, pk): # pk là Artist ID
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        artist_id = None
+        try: artist_id = ObjectId(pk)
+        except Exception: return Response({"error": "Invalid Artist ID format"}, 400)
+
+        # --- Xử lý Params (Sort, Limit) ---
+        try:
+             # Ví dụ lấy 6 album mới nhất cho "Recent releases"
+             limit = int(request.query_params.get('limit', 6))
+             # Sort theo release_time giảm dần (cần field này trong DB)
+             sort_field = request.query_params.get('sort', 'release_time')
+             sort_order = -1 if request.query_params.get('order', 'desc').lower() == 'desc' else 1
+             if limit < 1 : limit = 6
+        except ValueError: limit = 6; sort_field = 'release_time'; sort_order = -1
+
+        try:
+            # --- Tìm albums của nghệ sĩ ---
+            # Cách 1: Dùng find (nếu không cần $lookup phức tạp trong AlbumSerializer)
+            # albums_cursor = db.albums.find({'artist_id': artist_id}).sort(sort_field, sort_order).limit(limit)
+            # albums_list = list(albums_cursor)
+            # # Cần fetch artist lại nếu AlbumSerializer không có sẵn artist
+            # for album in albums_list:
+            #    album['artist'] = get_object(db.artists, str(album.get('artist_id')))
+
+            # Cách 2: Dùng Aggregation (tốt hơn nếu cần dữ liệu lồng nhau cho Album)
+            match_stage = {'$match': {'artist_id': artist_id}}
+            sort_stage = {'$sort': {sort_field: sort_order}}
+            limit_stage = {'$limit': limit}
+            pipeline = [match_stage] + self._get_album_pipeline() + [sort_stage, limit_stage] # Gọi pipeline của Album
+
+            albums_list = list(db.albums.aggregate(pipeline))
+            # -----------------------------
+
+            # Serialize danh sách album
+            serializer = AlbumSerializer(albums_list, many=True, context={'request': request})
+            # Trả về mảng trực tiếp hoặc cấu trúc có results tùy ý
+            return Response(serializer.data) # Hoặc Response({'results': serializer.data})
+
+        except Exception as e:
+            print(f"Error fetching albums for artist {pk}: {e}")
+            return Response({"error": f"Could not retrieve albums for artist {pk}"}, 500)
+        
+class ArtistTopTracksView(APIView):
+    """ Lấy danh sách bài hát phổ biến nhất của một nghệ sĩ. """
+    permission_classes = [AllowAny]
+    _get_song_pipeline = staticmethod(get_song_aggregation_pipeline) # Nếu dùng chung
+
+    def get(self, request, pk): # pk là Artist ID
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        artist_id = None
+        try: artist_id = ObjectId(pk)
+        except Exception: return Response({"error": "Invalid Artist ID format"}, 400)
+
+        # --- Xử lý Params (Limit) ---
+        try:
+             limit = int(request.query_params.get('limit', 5)) # Mặc định lấy top 5
+             if limit < 1 : limit = 5
+        except ValueError: limit = 5
+
+        try:
+            # --- Tìm tracks của nghệ sĩ, sắp xếp theo plays giảm dần ---
+            match_stage = {'$match': {'artist_ids': artist_id}} # Tìm trong mảng artist_ids
+            sort_stage = {'$sort': {'number_of_plays': -1}} # Sắp xếp giảm dần theo lượt nghe
+            limit_stage = {'$limit': limit}
+            # Kết hợp với pipeline lấy dữ liệu lồng nhau của Song
+            pipeline = [match_stage] + self._get_song_pipeline() + [sort_stage, limit_stage]
+
+            top_tracks = list(db.songs.aggregate(pipeline))
+            # ---------------------------------------------------------
+
+            serializer = SongSerializer(top_tracks, many=True, context={'request': request})
+            return Response(serializer.data) # Trả về mảng tracks
+
+        except Exception as e:
+            print(f"Error fetching top tracks for artist {pk}: {e}")
+            return Response({"error": f"Could not retrieve top tracks for artist {pk}"}, 500)
+        
+class GenreTracksView(APIView):
+    """ Lấy danh sách bài hát thuộc một thể loại cụ thể. """
+    permission_classes = [AllowAny] # Ai cũng có thể xem bài hát theo genre
+    _get_song_pipeline = staticmethod(get_song_aggregation_pipeline)
+
+    def get(self, request, pk): # pk là Genre ID (ObjectId string)
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        genre_id = None
+        try:
+            genre_id = ObjectId(pk)
+        except Exception:
+             return Response({"error": "Invalid Genre ID format"}, status=400)
+
+        # Kiểm tra genre có tồn tại không (tùy chọn)
+        genre_exists = db.musicgenres.count_documents({'_id': genre_id}, limit=1) > 0
+        if not genre_exists:
+            return Response({"error": "Genre not found"}, status=404)
+
+        # --- Xử lý Params (Sort, Pagination - Tùy chọn) ---
+        try:
+            page = int(request.query_params.get('page', 1))
+            limit = int(request.query_params.get('limit', 20)) # Ví dụ 20 bài/trang
+            sort_field = request.query_params.get('sort', 'song_name') # Mặc định sort theo tên
+            sort_order = 1 if request.query_params.get('order', 'asc').lower() == 'asc' else -1
+            if page < 1: page = 1
+            if limit < 1: limit = 20
+            skip = (page - 1) * limit
+        except ValueError:
+            return Response({"error": "Invalid 'page' or 'limit' parameter."}, status=400)
+        # ----------------------------------------------
+
+        try:
+            # --- Tìm tracks có musicgenre_id này ---
+            match_stage = {'$match': {'musicgenre_ids': genre_id}} # Tìm trong mảng musicgenre_ids
+
+            # --- Tính tổng số tracks cho pagination ---
+            count_pipeline = [match_stage, {'$count': 'total'}]
+            count_result = list(db.songs.aggregate(count_pipeline))
+            total_documents = count_result[0]['total'] if count_result else 0
+            total_pages = ceil(total_documents / limit) # Cần import ceil from math
+            # ----------------------------------------
+
+            # --- Pipeline hoàn chỉnh để lấy dữ liệu trang hiện tại ---
+            sort_stage = {'$sort': {sort_field: sort_order}}
+            skip_stage = {'$skip': skip}
+            limit_stage = {'$limit': limit}
+            # Kết hợp với pipeline chuẩn của Song để lấy dữ liệu lồng nhau
+            pipeline = [match_stage] + self._get_song_pipeline() + [sort_stage, skip_stage, limit_stage]
+
+            genre_tracks = list(db.songs.aggregate(pipeline))
+            # -----------------------------------------------
+
+            serializer = SongSerializer(genre_tracks, many=True, context={'request': request})
+
+            # --- Trả về cấu trúc có pagination ---
+            return Response({
+                'count': total_documents,
+                'total_pages': total_pages,
+                'current_page': page,
+                'limit': limit,
+                'results': serializer.data
+            })
+            # ------------------------------------
+
+        except Exception as e:
+            print(f"Error fetching tracks for genre {pk}: {e}")
+            return Response({"error": f"Could not retrieve tracks for genre {pk}"}, 500)
+        
+class FeaturedContentView(APIView):
+    """
+    Trả về một album hoặc playlist nổi bật (ví dụ: lấy ngẫu nhiên hoặc mới nhất).
+    API: GET /api/home/featured/
+    """
+    permission_classes = [AllowAny]
+    _get_album_pipeline = staticmethod(get_album_aggregation_pipeline) # Tái sử dụng
+
+    def get(self, request):
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        try:
+            # --- Logic lấy Featured Content ---
+            # Ví dụ: Lấy 1 album mới nhất hoặc ngẫu nhiên
+            # Cần có trường ngày tạo (ví dụ: 'createdAt') hoặc dựa vào _id
+            # Hoặc một trường 'is_featured' = True
+
+            # Lấy 5 album mới nhất (ví dụ)
+            pipeline_albums = [{'$sort': {'_id': -1}}, {'$limit': 5}] + self._get_album_pipeline()
+            recent_albums = list(db.albums.aggregate(pipeline_albums))
+
+            # Lấy 5 playlist mới nhất (ví dụ) - Cần tạo get_playlist_aggregation_pipeline()
+            # recent_playlists = list(db.playlists.find().sort('_id', -1).limit(5))
+
+            featured_item = None
+            item_type = None
+
+            # Chọn ngẫu nhiên từ danh sách lấy được
+            if recent_albums:
+                # featured_item = random.choice(recent_albums) # Chọn ngẫu nhiên
+                featured_item = recent_albums[0] # Hoặc lấy cái mới nhất
+                item_type = 'album'
+            # elif recent_playlists: # Nếu có playlist
+            #     featured_item = random.choice(recent_playlists)
+            #     item_type = 'playlist'
+
+            if featured_item:
+                # Serialize dựa trên type
+                if item_type == 'album':
+                    serializer = AlbumSerializer(featured_item, context={'request': request})
+                # elif item_type == 'playlist':
+                #     serializer = PlaylistSerializer(featured_item, context={'request': request}) # Cần PlaylistSerializer
+                else: # Fallback
+                     return Response({"error": "No featured content available."}, status=404)
+
+                # Trả về thêm type để frontend biết cách xử lý
+                return Response({**serializer.data, "type": item_type})
+            else:
+                return Response({"error": "No featured content available."}, status=404)
+
+        except Exception as e:
+            print(f"Error fetching featured content: {e}")
+            return Response({"error": "Could not retrieve featured content"}, 500)
+
+
+class MostPlayedView(APIView):
+    """
+    Trả về danh sách các bài hát hoặc album được nghe nhiều nhất.
+    API: GET /api/home/most-played/?type=songs&limit=10  (type có thể là 'songs' hoặc 'albums')
+    """
+    permission_classes = [AllowAny]
+    _get_song_pipeline = staticmethod(get_song_aggregation_pipeline)
+    _get_album_pipeline = staticmethod(get_album_aggregation_pipeline)
+
+    def get(self, request):
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        try:
+            item_type = request.query_params.get('type', 'songs').lower()
+            limit = int(request.query_params.get('limit', 10))
+            if limit < 1 or limit > 50: limit = 10 # Giới hạn an toàn
+
+            results = []
+            if item_type == 'songs':
+                # Sắp xếp theo number_of_plays giảm dần
+                pipeline = [{'$sort': {'number_of_plays': -1}}, {'$limit': limit}] + self._get_song_pipeline()
+                results = list(db.songs.aggregate(pipeline))
+                serializer = SongSerializer(results, many=True, context={'request': request})
+            elif item_type == 'albums':
+                pipeline = [{'$sort': {'number_of_plays': -1}}, {'$limit': limit}] + self._get_album_pipeline()
+                results = list(db.albums.aggregate(pipeline))
+                serializer = AlbumSerializer(results, many=True, context={'request': request})
+            else:
+                return Response({"error": "Invalid type parameter. Use 'songs' or 'albums'."}, status=400)
+
+            return Response({"results": serializer.data, "count": len(results)}) # Hoặc count từ DB nếu có phân trang
+
+        except Exception as e:
+            print(f"Error fetching most played {item_type}: {e}")
+            return Response({"error": f"Could not retrieve most played {item_type}"}, 500)
+
+
+class LibraryHighlightsView(APIView):
+    """
+    Trả về các mục nổi bật từ thư viện (ví dụ: mix albums, playlists, artists).
+    API: GET /api/home/library-highlights/?limit=10
+    Hiện tại, ví dụ này sẽ trả về albums và artists mới nhất.
+    """
+    permission_classes = [AllowAny] # Hoặc IsAuthenticated nếu là thư viện của user
+    _get_album_pipeline = staticmethod(get_album_aggregation_pipeline)
+
+    def get(self, request):
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        try:
+            limit_per_type = int(request.query_params.get('limit', 5)) # Lấy 5 của mỗi loại
+            if limit_per_type < 1 or limit_per_type > 20: limit_per_type = 5
+
+            highlights = []
+
+            # Lấy albums mới nhất
+            pipeline_albums = [{'$sort': {'_id': -1}}, {'$limit': limit_per_type}] + self._get_album_pipeline()
+            recent_albums = list(db.albums.aggregate(pipeline_albums))
+            album_serializer = AlbumSerializer(recent_albums, many=True, context={'request': request})
+            for album_data in album_serializer.data:
+                highlights.append({**album_data, "item_type": "album"}) # Thêm item_type
+
+            # Lấy artists mới nhất (ví dụ)
+            recent_artists = list(db.artists.find().sort('_id', -1).limit(limit_per_type))
+            artist_serializer = ArtistSerializer(recent_artists, many=True, context={'request': request})
+            for artist_data in artist_serializer.data:
+                highlights.append({**artist_data, "item_type": "artist"}) # Thêm item_type
+
+            # Xáo trộn danh sách highlights cuối cùng (tùy chọn)
+            random.shuffle(highlights)
+
+            return Response({"results": highlights, "count": len(highlights)})
+
+        except Exception as e:
+            print(f"Error fetching library highlights: {e}")
+            return Response({"error": "Could not retrieve library highlights"}, 500)
+
+
+class RecentlyAddedReleasesView(APIView):
+    """
+    Trả về các album mới được thêm/phát hành gần đây.
+    API: GET /api/home/new-releases/?limit=10
+    """
+    permission_classes = [AllowAny]
+    _get_album_pipeline = staticmethod(get_album_aggregation_pipeline)
+
+    def get(self, request):
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        try:
+            limit = int(request.query_params.get('limit', 10))
+            if limit < 1 or limit > 50: limit = 10
+
+            # Sắp xếp theo release_time (nếu có) hoặc _id (ngày tạo) giảm dần
+            # Nếu release_time là string, cần $dateFromString trước khi sort
+            sort_criteria = {'release_time': -1, '_id': -1} # Ưu tiên release_time
+            pipeline = [{'$sort': sort_criteria}, {'$limit': limit}] + self._get_album_pipeline()
+            new_releases = list(db.albums.aggregate(pipeline))
+
+            serializer = AlbumSerializer(new_releases, many=True, context={'request': request})
+            return Response({"results": serializer.data, "count": len(new_releases)})
+
+        except Exception as e:
+            print(f"Error fetching new releases: {e}")
+            return Response({"error": "Could not retrieve new releases"}, 500)

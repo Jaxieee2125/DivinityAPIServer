@@ -46,4 +46,12 @@ urlpatterns = [
     path('playlists/', views.PlaylistList.as_view(), name='playlist-list'),
     path('playlists/<str:pk>/', views.PlaylistDetail.as_view(), name='playlist-detail'),
     path('search/', views.SearchView.as_view(), name='search'),
+    path('albums/<str:pk>/songs/', views.AlbumSongsView.as_view(), name='album-songs'),
+    path('artists/<str:pk>/albums/', views.ArtistAlbumsView.as_view(), name='artist-albums'),
+    path('artists/<str:pk>/top-tracks/', views.ArtistTopTracksView.as_view(), name='artist-top-tracks'),
+    path('musicgenres/<str:pk>/tracks/', views.GenreTracksView.as_view(), name='genre-tracks'),
+    path('home/featured/', views.FeaturedContentView.as_view(), name='home-featured'),
+    path('home/most-played/', views.MostPlayedView.as_view(), name='home-most-played'),
+    path('home/library-highlights/', views.LibraryHighlightsView.as_view(), name='home-library-highlights'),
+    path('home/new-releases/', views.RecentlyAddedReleasesView.as_view(), name='home-new-releases'),
 ]
