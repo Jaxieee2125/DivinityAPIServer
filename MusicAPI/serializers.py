@@ -7,6 +7,9 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.contrib.auth.password_validation import validate_password # Để kiểm tra độ mạnh mật khẩu
 from django.contrib.auth.hashers import make_password                 # Để băm mật khẩu
 from datetime import datetime
+import os  # <<< THÊM IMPORT MODULE os
+from django.core.files.storage import default_storage # <<< THÊM IMPORT default_storage
+from django.contrib.auth.hashers import check_password # Cần cho kiểm tra pass cũ
 
 # from urllib.parse import urljoin # Một lựa chọn khác
 
@@ -449,3 +452,128 @@ class UserRegistrationSerializer(serializers.Serializer):
                  {"database_error": "Không thể tạo tài khoản vào lúc này. Vui lòng thử lại sau."}
              )
 
+
+class UserUpdateSerializer(serializers.Serializer):
+
+    """ Serializer cho phép user cập nhật thông tin cá nhân của họ. """
+    # Chỉ cho phép cập nhật các trường này
+    username = serializers.CharField(max_length=150, required=False)
+    email = serializers.EmailField(required=False)
+    date_of_birth = serializers.DateField(required=False, allow_null=True, input_formats=['%Y-%m-%d', 'iso-8601']) # Cho phép null, định dạng input
+    profile_picture = serializers.ImageField(required=False, allow_null=True) # Cho phép upload ảnh mới
+
+    # Thêm các trường khác user được phép sửa
+
+    # KHÔNG BAO GỒM: is_staff, is_active, date_joined, password (password đổi ở endpoint riêng)
+
+    def _get_db_from_context(self):
+        db = self.context.get('db')
+        if db is None: raise serializers.ValidationError("Lỗi hệ thống DB.")
+        return db
+
+    def validate_username(self, value):
+        """ Kiểm tra username mới không trùng với user khác. """
+        db = self._get_db_from_context()
+        instance = self.instance # User document gốc được truyền vào từ view
+        if instance and db.users.count_documents({
+            "username": value,
+            "_id": {"$ne": instance.get('_id')} # Loại trừ chính user này
+        }) > 0:
+            raise serializers.ValidationError("Tên đăng nhập này đã được người khác sử dụng.")
+        return value
+
+    def validate_email(self, value):
+        """ Kiểm tra email mới không trùng với user khác. """
+        db = self._get_db_from_context()
+        instance = self.instance
+        try: validate_email(value)
+        except DjangoValidationError: raise serializers.ValidationError("Địa chỉ email không hợp lệ.")
+
+        if instance and db.users.count_documents({
+            "email": value,
+            "_id": {"$ne": instance.get('_id')}
+        }) > 0:
+            raise serializers.ValidationError("Địa chỉ email này đã được người khác sử dụng.")
+        return value
+
+    # Hàm update sẽ được gọi bởi serializer.save() khi có instance
+    def update(self, instance, validated_data):
+        """ Cập nhật dữ liệu user trong MongoDB. """
+        print(f"[UserUpdateSerializer update] Updating user ID: {instance.get('_id')}")
+        print(f"[UserUpdateSerializer update] Validated data: {validated_data}")
+
+        db = self._get_db_from_context()
+        users_collection = db.users
+        user_id = instance.get('_id')
+
+        update_fields = {} # Chỉ những field được validate mới vào đây
+        new_picture_file = validated_data.pop('profile_picture', None)
+        picture_path_to_save = instance.get('profile_picture') # Giữ path cũ
+
+        # Xử lý ảnh mới (tương tự logic trong view PUT cũ)
+        if new_picture_file:
+            old_picture_path = instance.get('profile_picture')
+            original_fn, file_ext = os.path.splitext(new_picture_file.name)
+            new_filename = f"{str(user_id)}{file_ext.lower()}"
+            relative_dir = os.path.join('users', 'avatars').replace("\\","/")
+            new_picture_path_relative = os.path.join(relative_dir, new_filename).replace("\\","/")
+            # Xóa ảnh cũ
+            if old_picture_path and old_picture_path != new_picture_path_relative and default_storage.exists(old_picture_path):
+                try: default_storage.delete(old_picture_path)
+                except Exception as e: print(f"Warning: Could not delete old picture {old_picture_path}: {e}")
+            # Lưu ảnh mới
+            picture_path_to_save = default_storage.save(new_picture_path_relative, new_picture_file)
+            print(f"[UserUpdateSerializer update] Saved new picture: {picture_path_to_save}")
+        # Luôn cập nhật trường profile_picture trong DB (là path mới hoặc path cũ)
+        update_fields['profile_picture'] = picture_path_to_save
+
+        # Xử lý date_of_birth
+        if 'date_of_birth' in validated_data:
+             dob = validated_data['date_of_birth']
+             update_fields['date_of_birth'] = datetime.combine(dob, datetime.min.time()) if dob else None
+
+        # Cập nhật các trường còn lại
+        for field, value in validated_data.items():
+            if field not in ['date_of_birth', 'profile_picture']: # Đã xử lý riêng
+                update_fields[field] = value
+
+        # Thực hiện cập nhật vào DB
+        if update_fields:
+            try:
+                result = users_collection.update_one(
+                    {'_id': user_id},
+                    {'$set': update_fields}
+                )
+                if result.matched_count == 0:
+                    raise serializers.ValidationError("User not found during update.")
+                print(f"[UserUpdateSerializer update] User {user_id} updated fields: {list(update_fields.keys())}")
+            except Exception as e:
+                 print(f"ERROR [UserUpdateSerializer update] DB update failed: {e}")
+                 raise serializers.ValidationError({"database_error": "Lỗi cập nhật cơ sở dữ liệu."})
+        else:
+             print("[UserUpdateSerializer update] No fields to update in database.")
+
+
+        # Trả về instance đã cập nhật (có thể fetch lại từ DB để chắc chắn)
+        updated_instance = users_collection.find_one({'_id': user_id}, {'password': 0})
+        return updated_instance
+    
+    # music_api/serializers.py
+
+class ChangePasswordSerializer(serializers.Serializer):
+    """ Serializer để user đổi mật khẩu của chính họ. """
+    old_password = serializers.CharField(required=True, write_only=True, style={'input_type': 'password'})
+    new_password = serializers.CharField(required=True, write_only=True, style={'input_type': 'password'})
+    # Có thể thêm confirm_new_password nếu muốn
+
+    def validate_new_password(self, value):
+        # Kiểm tra độ mạnh mật khẩu mới
+        try:
+            validate_password(value, user=self.context.get('request').user) # Truyền user nếu validator cần
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(list(e.messages))
+        return value
+
+    # Không cần validate_old_password ở đây, sẽ kiểm tra trong hàm save/update
+    # Không cần hàm create
+    # Hàm save (hoặc update nếu bạn muốn) sẽ xử lý logic chính
