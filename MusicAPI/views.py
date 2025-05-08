@@ -70,27 +70,25 @@ class AdminLoginView(APIView):
     @staticmethod
     def get_tokens_for_admin_user(user_doc):
         # --- Tự xây dựng Payload ---
-        user_id_str = str(user_doc['_id'])
-        username = user_doc.get('username')
+        # user_id ở đây là user_id từ collection 'admin', KHÔNG phải _id của admin document
+        user_id_str = str(user_doc['_id']) # <<< Lấy _id của USER được liên kết với admin
+        username = user_doc.get('username') # Username của admin
 
-        # Tạo Refresh Token trước (nó chứa các thông tin cơ bản)
-        # Chúng ta cần tạo instance RefreshToken để lấy access_token từ nó
-        # Hoặc tạo cả hai từ đầu
-
-        # Cách 1: Tạo RefreshToken, AccessToken lấy từ RefreshToken
         try:
-            refresh = RefreshToken() # Tạo instance rỗng
-            # Thêm các claims cần thiết vào payload của refresh token
-            refresh['user_mongo_id'] = user_id_str
-            # Thêm các claims khác bạn muốn có trong refresh token (thường ít hơn access)
-            # refresh['username'] = username # Tùy chọn
+            refresh = RefreshToken()
+            # --- Thêm claim vào REFRESH token ---
+            # ID của USER liên kết với admin (không phải _id của admin document)
+            refresh[settings.SIMPLE_JWT['USER_ID_CLAIM']] = user_id_str # Dùng setting USER_ID_CLAIM
 
-            # Tạo access token từ refresh token (sẽ kế thừa một số claim và có thời hạn riêng)
+            # --- Thêm claim vào ACCESS token ---
             access = refresh.access_token
-            access['username'] = username # Thêm vào access token nếu cần
-            access['is_staff'] = True     # Thêm quyền vào access token
-            access['is_active'] = True    # Thêm trạng thái vào access token
-            # Thêm các claims khác cho access token nếu cần
+            # ID của USER liên kết với admin
+            access[settings.SIMPLE_JWT['USER_ID_CLAIM']] = user_id_str # Dùng setting USER_ID_CLAIM
+            access['username'] = username # Username của admin
+            access['is_staff'] = True     # <<< QUAN TRỌNG: Đánh dấu là admin
+            access['is_active'] = True    # Giả sử admin luôn active khi đăng nhập được
+
+            print(f"[_get_tokens_for_admin_user] Generated tokens for admin '{username}' linked to user_id '{user_id_str}'")
 
             return {
                 'refresh': str(refresh),
@@ -98,9 +96,9 @@ class AdminLoginView(APIView):
             }
 
         except Exception as e:
-             print(f"Error creating tokens for {username}: {e}")
-             raise e # Ném lỗi ra ngoài để view xử lý
-
+             print(f"Error creating tokens for admin {username}: {e}")
+             raise e
+        
     def post(self, request):
         if not db: return Response({"error": "Database connection failed"}, status=500)
 
@@ -534,8 +532,8 @@ class UserList(APIView):
 
 
 class UserDetail(APIView):
-    """ API endpoint để admin lấy, sửa, xóa thông tin user. """
-    permission_classes = [IsAdminFromMongo] # Chỉ admin
+    """ API endpoint để admin,user lấy, sửa, xóa thông tin user. """
+    permission_classes = [IsAuthenticated] #  admin, user đều có thể xem thông tin của mình
 
     def get(self, request, pk):
         """ Lấy chi tiết user (không bao gồm password). """
