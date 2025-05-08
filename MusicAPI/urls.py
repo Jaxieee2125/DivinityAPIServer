@@ -26,7 +26,9 @@ urlpatterns = [
 
     # URL quản lý User (ví dụ: xem danh sách, chi tiết - cần bảo vệ bằng permission)
     path('users/', views.UserList.as_view(), name='user-list'),
+    path('users/change-password/', views.ChangePasswordView.as_view(), name='change-password'),
     path('users/<str:pk>/', views.UserDetail.as_view(), name='user-detail'),
+    
 
     # --- Admin Specific URLs ---
     path('admin/stats/', views.AdminStatsView.as_view(), name='admin-stats'),

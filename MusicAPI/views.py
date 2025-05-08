@@ -8,7 +8,8 @@ from .serializers import (
     MusicGenreSerializer, UserSerializer, AdminSerializer,
     ArtistSerializer, AlbumSerializer, SongSerializer,
     PlaylistSerializer, AlbumSelectSerializer, ArtistSelectSerializer,
-    MusicGenreSelectSerializer, UserRegistrationSerializer
+    MusicGenreSelectSerializer, UserRegistrationSerializer,
+    UserSerializer, UserUpdateSerializer, ChangePasswordSerializer
 )
 from datetime import datetime, timezone
 from pymongo import MongoClient
@@ -2536,3 +2537,46 @@ def serve_media_with_range(request, path):
         # Có thể raise Http404 hoặc trả về lỗi server tùy tình huống
         # raise Http404("Error processing file.")
         return HttpResponseServerError("Error processing media file.")
+    
+class ChangePasswordView(APIView):
+    """ Endpoint cho phép user đã đăng nhập đổi mật khẩu của chính họ. """
+    permission_classes = [IsAuthenticated] # << Yêu cầu phải đăng nhập
+
+    def post(self, request, *args, **kwargs):
+        print("[ChangePasswordView] Received POST request.") # Thêm debug
+        if not db: return Response({"error": "Lỗi DB."}, status=500)
+
+        user = request.user
+        user_mongo_id_str = getattr(user, 'user_mongo_id', None)
+        if not user_mongo_id_str:
+            return Response({"error": "Không thể xác định người dùng."}, status=400)
+
+        serializer = ChangePasswordSerializer(data=request.data, context={'request': request})
+
+        if serializer.is_valid():
+            old_password = serializer.validated_data['old_password']
+            new_password = serializer.validated_data['new_password']
+
+            # Lấy hash cũ từ DB
+            try:
+                user_doc = db.users.find_one({'_id': ObjectId(user_mongo_id_str)})
+                if not user_doc: return Response({"error": "User not found."}, 404)
+                current_hash = user_doc.get('password')
+            except Exception as e:
+                print(f"Error fetching user for pass change: {e}")
+                return Response({"error": "Lỗi DB."}, 500)
+
+            # Kiểm tra pass cũ
+            if not check_password(old_password, current_hash):
+                return Response({"old_password": ["Mật khẩu cũ không chính xác."]}, status=400)
+
+            # Hash và cập nhật pass mới
+            try:
+                new_hash = make_password(new_password)
+                db.users.update_one({'_id': ObjectId(user_mongo_id_str)}, {'$set': {'password': new_hash}})
+                return Response({"message": "Đổi mật khẩu thành công."}, status=200)
+            except Exception as e:
+                print(f"Error updating password: {e}")
+                return Response({"error": "Lỗi cập nhật mật khẩu."}, 500)
+        else:
+            return Response(serializer.errors, status=400) # Lỗi validation
