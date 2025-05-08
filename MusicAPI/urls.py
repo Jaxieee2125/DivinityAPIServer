@@ -28,11 +28,13 @@ urlpatterns = [
     path('users/', views.UserList.as_view(), name='user-list'),
     path('users/change-password/', views.ChangePasswordView.as_view(), name='change-password'),
     path('users/<str:pk>/', views.UserDetail.as_view(), name='user-detail'),
-    
+    path('profile/', views.UserProfileView.as_view(), name='user-profile-current'),
 
     # --- Admin Specific URLs ---
     path('admin/stats/', views.AdminStatsView.as_view(), name='admin-stats'),
     path('admin/', views.AdminList.as_view(), name='admin-list'), # Có thể trùng với trang admin Django? Xem xét đổi tên
+    path('admin/song-requests/', views.AdminSongRequestListView.as_view(), name='admin-song-request-list'),
+    path('admin/song-requests/<str:pk>/', views.AdminSongRequestDetailView.as_view(), name='admin-song-request-detail'),
     path('admin/<str:pk>/', views.AdminDetail.as_view(), name='admin-detail'),
 
     # --- Other API Resource URLs ---
@@ -58,6 +60,7 @@ urlpatterns = [
     path('home/most-played/', views.MostPlayedView.as_view(), name='home-most-played'),
     path('home/library-highlights/', views.LibraryHighlightsView.as_view(), name='home-library-highlights'),
     path('home/new-releases/', views.RecentlyAddedReleasesView.as_view(), name='home-new-releases'),
+    path('song-requests/', views.SongRequestView.as_view(), name='song-request'),
 ]
 
 

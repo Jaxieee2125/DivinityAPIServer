@@ -9,7 +9,8 @@ from .serializers import (
     ArtistSerializer, AlbumSerializer, SongSerializer,
     PlaylistSerializer, AlbumSelectSerializer, ArtistSelectSerializer,
     MusicGenreSelectSerializer, UserRegistrationSerializer,
-    UserSerializer, UserUpdateSerializer, ChangePasswordSerializer
+    UserSerializer, UserUpdateSerializer, ChangePasswordSerializer, 
+    SongRequestSerializer
 )
 from datetime import datetime, timezone
 from pymongo import MongoClient
@@ -2580,3 +2581,226 @@ class ChangePasswordView(APIView):
                 return Response({"error": "Lỗi cập nhật mật khẩu."}, 500)
         else:
             return Response(serializer.errors, status=400) # Lỗi validation
+
+class UserProfileView(APIView):
+    """
+    API endpoint cho phép người dùng đã đăng nhập xem và cập nhật
+    thông tin profile cá nhân của chính họ.
+    """
+    permission_classes = [IsAuthenticated] # << Chỉ user đã đăng nhập mới truy cập được
+
+    def get_current_user_doc(self, request):
+        """ Lấy document user từ DB dựa trên thông tin trong token. """
+        if not db: return None
+        # Lấy user_mongo_id từ request.user (được tạo bởi Authentication class)
+        user_id_str = None
+        if request.user and hasattr(request.user, settings.SIMPLE_JWT['USER_ID_CLAIM']):
+            user_id_str = getattr(request.user, settings.SIMPLE_JWT['USER_ID_CLAIM'])
+        elif request.user and isinstance(request.user, dict):
+             user_id_str = request.user.get(settings.SIMPLE_JWT['USER_ID_CLAIM'])
+
+        if not user_id_str:
+            print("[UserProfileView] ERROR: Could not extract user ID from request.user")
+            return None
+        try:
+            # Tìm user trong DB, loại bỏ password
+            user_doc = db.users.find_one({'_id': ObjectId(user_id_str)}, {'password': 0})
+            return user_doc
+        except Exception as e:
+            print(f"Error fetching current user doc (ID: {user_id_str}): {e}")
+            return None
+
+    def get(self, request, *args, **kwargs):
+        """ Lấy thông tin profile của người dùng đang đăng nhập. """
+        print("[UserProfileView GET] Request received.")
+        user_doc = self.get_current_user_doc(request)
+
+        if user_doc:
+            # Dùng UserSerializer để hiển thị đầy đủ thông tin (có URL ảnh)
+            serializer = UserSerializer(user_doc, context={'request': request})
+            return Response(serializer.data)
+        else:
+            # Nếu không tìm thấy user (có thể do lỗi token/DB)
+            return Response({"detail": "Không thể lấy thông tin người dùng."}, status=status.HTTP_404_NOT_FOUND)
+
+    def put(self, request, *args, **kwargs): # Hoặc dùng patch
+        """ Cập nhật thông tin profile của người dùng đang đăng nhập. """
+        print("[UserProfileView PUT] Request received.")
+        original_user_doc = self.get_current_user_doc(request)
+
+        if not original_user_doc:
+            return Response({"detail": "Không thể xác thực người dùng để cập nhật."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Sử dụng UserUpdateSerializer để chỉ cho phép cập nhật các trường giới hạn
+        # Truyền instance gốc, data mới, partial=True, và context
+        serializer = UserUpdateSerializer(
+            instance=original_user_doc,
+            data=request.data,
+            partial=True, # Cho phép cập nhật một phần
+            context={'request': request, 'db': db} # Truyền db cho validation
+        )
+
+        if serializer.is_valid():
+            try:
+                updated_user = serializer.save() # Gọi hàm update() trong UserUpdateSerializer
+                # Trả về dữ liệu user đã cập nhật (dùng UserSerializer chuẩn)
+                response_serializer = UserSerializer(updated_user, context={'request': request})
+                print(f"[UserProfileView PUT] Profile updated successfully for user: {original_user_doc.get('_id')}")
+                return Response(response_serializer.data)
+            except serializer.ValidationError as e:
+                # Lỗi từ hàm update của serializer (ví dụ lỗi DB)
+                print(f"ERROR [UserProfileView PUT] ValidationError during save: {e.detail}")
+                return Response(e.detail, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            except Exception as e:
+                print(f"ERROR [UserProfileView PUT] Unexpected error during save: {e}")
+                return Response({"error": "Không thể cập nhật hồ sơ."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        else:
+            # Lỗi validation từ input của user
+            print(f"[UserProfileView PUT] Serializer validation errors: {serializer.errors}")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+class SongRequestView(APIView):
+    """ Endpoint cho phép user gửi yêu cầu bài hát mới. """
+    permission_classes = [IsAuthenticated] # Yêu cầu đăng nhập
+
+    def post(self, request, *args, **kwargs):
+        print("[SongRequestView POST] Received song request.")
+        if not db: return Response({"error": "Lỗi DB"}, status=500)
+
+        serializer = SongRequestSerializer(data=request.data)
+        if serializer.is_valid():
+            # Lấy thông tin user từ token
+            user = request.user
+            user_mongo_id_str = getattr(user, 'user_mongo_id', None)
+            user_name = getattr(user, 'username', 'Unknown')
+
+            if not user_mongo_id_str:
+                return Response({"error": "Không thể xác định người dùng."}, status=400)
+
+            # Chuẩn bị dữ liệu để lưu vào DB
+            request_data = serializer.validated_data
+            request_data['user_id'] = ObjectId(user_mongo_id_str) # Lưu ObjectId
+            request_data['username'] = user_name # Lưu username cho tiện
+            request_data['status'] = 'pending'   # Trạng thái ban đầu
+            request_data['requested_at'] = datetime.utcnow()
+            request_data['processed_at'] = None
+            request_data['admin_notes'] = None
+
+            try:
+                result = db.song_requests.insert_one(request_data)
+                print(f"[SongRequestView POST] Song request saved with ID: {result.inserted_id} by user {user_mongo_id_str}")
+                # Trả về thông báo thành công
+                return Response({"message": "Yêu cầu của bạn đã được gửi thành công!"}, status=status.HTTP_201_CREATED)
+            except Exception as e:
+                print(f"ERROR [SongRequestView POST] Failed to save song request: {e}")
+                return Response({"error": "Không thể gửi yêu cầu vào lúc này."}, status=500)
+        else:
+            # Lỗi validation
+            print(f"[SongRequestView POST] Serializer errors: {serializer.errors}")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+class AdminSongRequestListView(APIView):
+    """ API endpoint cho Admin xem danh sách các yêu cầu bài hát. """
+    permission_classes = [IsAdminFromMongo] # << Chỉ Admin
+
+    def get(self, request, *args, **kwargs):
+        print("[AdminSongRequestListView GET] Request received.")
+        if not db: return Response({"error": "Lỗi DB."}, status=500)
+
+        try:
+            # Lọc theo trạng thái (ví dụ: /api/admin/manage/song-requests/?status=pending)
+            query_status = request.query_params.get('status', None)
+            filter_query = {}
+            if query_status and query_status in ['pending', 'approved', 'rejected', 'added']:
+                filter_query['status'] = query_status
+                print(f"Filtering requests by status: {query_status}")
+
+            # Sắp xếp (ví dụ: mới nhất trước)
+            # MongoDB trả về theo thứ tự chèn tự nhiên nếu không sort
+            sort_query = [('requested_at', -1)] # -1 là descending (mới nhất trước)
+
+            # TODO: Thêm pagination nếu danh sách quá dài
+
+            requests_cursor = db.song_requests.find(filter_query).sort(sort_query)
+            requests_list = list(requests_cursor)
+
+            # Serialize dữ liệu (cần chuyển ObjectId thành string)
+            # SongRequestSerializer cơ bản có thể chưa xử lý ObjectId, cần đảm bảo
+            # Bạn có thể tạo một serializer riêng cho admin view nếu cần thêm thông tin
+            # Hoặc điều chỉnh SongRequestSerializer để xử lý ObjectId nếu cần
+            for req in requests_list:
+                 req['_id'] = str(req['_id']) # Chuyển _id
+                 if 'user_id' in req: req['user_id'] = str(req['user_id']) # Chuyển user_id
+
+            # Hiện tại dùng lại SongRequestSerializer, xem xét tạo serializer riêng nếu cần
+            # Không cần context nếu serializer không xử lý URL media
+            serializer = SongRequestSerializer(requests_list, many=True)
+
+            # Trả về cả tổng số request để phân trang (nếu có)
+            total_count = db.song_requests.count_documents(filter_query)
+
+            return Response({'count': total_count, 'results': serializer.data})
+
+        except Exception as e:
+            print(f"ERROR [AdminSongRequestListView GET]: {e}")
+            return Response({"error": "Không thể lấy danh sách yêu cầu."}, status=500)
+        
+class AdminSongRequestDetailView(APIView):
+    """ API endpoint cho Admin cập nhật trạng thái một yêu cầu bài hát. """
+    permission_classes = [IsAdminFromMongo] # << Chỉ Admin
+
+    def get_object(self, request_id_str):
+         if not db: return None
+         try: return db.song_requests.find_one({'_id': ObjectId(request_id_str)})
+         except Exception: return None
+
+    def put(self, request, pk, *args, **kwargs): # pk là request_id
+        print(f"[AdminSongRequestDetailView PUT] Request for request_id: {pk}")
+        if not db: return Response({"error": "Lỗi DB."}, status=500)
+
+        song_request = self.get_object(pk)
+        if not song_request:
+             return Response({"detail": "Không tìm thấy yêu cầu."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Dữ liệu admin gửi lên (chỉ cần status và admin_notes)
+        new_status = request.data.get('status')
+        admin_notes = request.data.get('admin_notes', None) # Ghi chú của admin
+
+        # Validate trạng thái mới
+        allowed_statuses = ['approved', 'rejected', 'added'] # Admin chỉ nên đổi sang các trạng thái này
+        if new_status not in allowed_statuses:
+             return Response({"status": [f"Trạng thái không hợp lệ. Chỉ chấp nhận: {', '.join(allowed_statuses)}."]}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Chuẩn bị dữ liệu cập nhật
+        update_data = {
+            'status': new_status,
+            'processed_at': datetime.utcnow(), # Ghi lại thời gian xử lý
+        }
+        if admin_notes is not None: # Chỉ cập nhật nếu admin có gửi ghi chú
+             update_data['admin_notes'] = admin_notes
+
+        try:
+            result = db.song_requests.update_one(
+                {'_id': ObjectId(pk)},
+                {'$set': update_data}
+            )
+
+            if result.matched_count == 0:
+                 # Trường hợp hiếm gặp: request bị xóa ngay trước khi update
+                 return Response({"detail": "Không tìm thấy yêu cầu để cập nhật."}, status=status.HTTP_404_NOT_FOUND)
+
+            print(f"[AdminSongRequestDetailView PUT] Updated request {pk} status to '{new_status}'")
+
+            # Fetch lại request đã cập nhật để trả về
+            updated_request = self.get_object(pk)
+            # Serialize lại (cần đảm bảo serializer xử lý ObjectId)
+            updated_request['_id'] = str(updated_request['_id'])
+            if 'user_id' in updated_request: updated_request['user_id'] = str(updated_request['user_id'])
+
+            # Dùng lại SongRequestSerializer hoặc tạo serializer riêng
+            serializer = SongRequestSerializer(updated_request)
+            return Response(serializer.data)
+
+        except Exception as e:
+             print(f"ERROR [AdminSongRequestDetailView PUT] Failed to update request {pk}: {e}")
+             return Response({"error": "Không thể cập nhật yêu cầu."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
