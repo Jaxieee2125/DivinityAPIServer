@@ -577,3 +577,9 @@ class ChangePasswordSerializer(serializers.Serializer):
     # Không cần validate_old_password ở đây, sẽ kiểm tra trong hàm save/update
     # Không cần hàm create
     # Hàm save (hoặc update nếu bạn muốn) sẽ xử lý logic chính
+
+class SongRequestSerializer(serializers.Serializer):
+    song_title = serializers.CharField(max_length=255, required=True, error_messages={'required': 'Vui lòng nhập tên bài hát.'})
+    artist_name = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    album_name = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    notes = serializers.CharField(max_length=500, required=False, allow_blank=True, style={'base_template': 'textarea.html'})
