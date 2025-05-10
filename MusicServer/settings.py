@@ -133,7 +133,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 CORS_ALLOW_ALL_ORIGINS = True
 
 MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'mediafiles')
+MEDIA_ROOT = os.path.join(BASE_DIR, 'Storage')
 
 if not os.path.exists(MEDIA_ROOT):
     os.makedirs(MEDIA_ROOT)
@@ -163,7 +163,7 @@ REST_FRAMEWORK = {
     }
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60), # Ví dụ: Access token hết hạn sau 60 phút
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=1), # Ví dụ: Access token hết hạn sau 60 phút
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),    # Ví dụ: Refresh token hết hạn sau 1 ngày
     "ROTATE_REFRESH_TOKENS": False, # Đặt là True nếu muốn refresh token cũ bị vô hiệu khi tạo mới
     "BLACKLIST_AFTER_ROTATION": False, # Cần cài đặt thêm nếu muốn blacklist token cũ
