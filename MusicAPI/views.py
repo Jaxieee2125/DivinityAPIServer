@@ -10,7 +10,7 @@ from .serializers import (
     PlaylistSerializer, AlbumSelectSerializer, ArtistSelectSerializer,
     MusicGenreSelectSerializer, UserRegistrationSerializer,
     UserSerializer, UserUpdateSerializer, ChangePasswordSerializer, 
-    SongRequestSerializer
+    AdminSongRequestSerializer,
 )
 from datetime import datetime, timezone
 from pymongo import MongoClient
@@ -2667,7 +2667,7 @@ class SongRequestView(APIView):
         print("[SongRequestView POST] Received song request.")
         if not db: return Response({"error": "Lỗi DB"}, status=500)
 
-        serializer = SongRequestSerializer(data=request.data)
+        serializer = AdminSongRequestSerializer(data=request.data)
         if serializer.is_valid():
             # Lấy thông tin user từ token
             user = request.user
@@ -2700,107 +2700,133 @@ class SongRequestView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
 class AdminSongRequestListView(APIView):
-    """ API endpoint cho Admin xem danh sách các yêu cầu bài hát. """
-    permission_classes = [IsAdminFromMongo] # << Chỉ Admin
+    permission_classes = [IsAdminFromMongo]
 
     def get(self, request, *args, **kwargs):
         print("[AdminSongRequestListView GET] Request received.")
-        if not db: return Response({"error": "Lỗi DB."}, status=500)
-
+        if not db: return Response({"error": "Lỗi DB."}, 500)
         try:
-            # Lọc theo trạng thái (ví dụ: /api/admin/manage/song-requests/?status=pending)
             query_status = request.query_params.get('status', None)
             filter_query = {}
             if query_status and query_status in ['pending', 'approved', 'rejected', 'added']:
                 filter_query['status'] = query_status
-                print(f"Filtering requests by status: {query_status}")
 
-            # Sắp xếp (ví dụ: mới nhất trước)
-            # MongoDB trả về theo thứ tự chèn tự nhiên nếu không sort
-            sort_query = [('requested_at', -1)] # -1 là descending (mới nhất trước)
+            # --- Pipeline với $lookup user ---
+            pipeline = [
+                {'$match': filter_query},
+                {'$lookup': {
+                    'from': 'users', # Tên collection users
+                    'localField': 'user_id',
+                    'foreignField': '_id',
+                    'as': 'user_details'
+                }},
+                {'$unwind': {'path': '$user_details', 'preserveNullAndEmptyArrays': True}},
+                {'$sort': {'requested_at': -1}}, # Sort trước khi project (hoặc sau)
+                # TODO: Thêm $skip, $limit cho pagination
+                {'$project': { # Chỉ lấy các trường cần thiết
+                    # '_id': 1, # Tự động có
+                    'song_title': 1, 'artist_name': 1, 'album_name': 1, 'notes': 1,
+                    'requested_at': 1, 'status': 1, 'processed_at': 1, 'admin_notes': 1,
+                    'user_id': 1, # Vẫn cần user_id gốc
+                    'user': { # Tạo object user lồng nhau
+                       '$cond': {
+                           'if': '$user_details',
+                           'then': {'_id': '$user_details._id', 'username': '$user_details.username'},
+                           'else': None # Hoặc {'username': 'Unknown User'}
+                       }
+                    }
+                }}
+            ]
+            # -------------------------------
 
-            # TODO: Thêm pagination nếu danh sách quá dài
+            requests_list = list(db.song_requests.aggregate(pipeline))
+            total_count = db.song_requests.count_documents(filter_query) # Count với filter
 
-            requests_cursor = db.song_requests.find(filter_query).sort(sort_query)
-            requests_list = list(requests_cursor)
-
-            # Serialize dữ liệu (cần chuyển ObjectId thành string)
-            # SongRequestSerializer cơ bản có thể chưa xử lý ObjectId, cần đảm bảo
-            # Bạn có thể tạo một serializer riêng cho admin view nếu cần thêm thông tin
-            # Hoặc điều chỉnh SongRequestSerializer để xử lý ObjectId nếu cần
-            for req in requests_list:
-                 req['_id'] = str(req['_id']) # Chuyển _id
-                 if 'user_id' in req: req['user_id'] = str(req['user_id']) # Chuyển user_id
-
-            # Hiện tại dùng lại SongRequestSerializer, xem xét tạo serializer riêng nếu cần
-            # Không cần context nếu serializer không xử lý URL media
-            serializer = SongRequestSerializer(requests_list, many=True)
-
-            # Trả về cả tổng số request để phân trang (nếu có)
-            total_count = db.song_requests.count_documents(filter_query)
-
+            # Sử dụng serializer mới
+            serializer = AdminSongRequestSerializer(requests_list, many=True, context={'request': request})
             return Response({'count': total_count, 'results': serializer.data})
 
         except Exception as e:
             print(f"ERROR [AdminSongRequestListView GET]: {e}")
-            return Response({"error": "Không thể lấy danh sách yêu cầu."}, status=500)
-        
+            return Response({"error": "Không thể lấy danh sách yêu cầu."}, 500)
+
 class AdminSongRequestDetailView(APIView):
-    """ API endpoint cho Admin cập nhật trạng thái một yêu cầu bài hát. """
-    permission_classes = [IsAdminFromMongo] # << Chỉ Admin
+    permission_classes = [IsAdminFromMongo]
 
-    def get_object(self, request_id_str):
-         if not db: return None
-         try: return db.song_requests.find_one({'_id': ObjectId(request_id_str)})
-         except Exception: return None
+    def get_object(self, request_id_str): # Hàm helper giữ nguyên
+        if not db: return None
+        try: return db.song_requests.find_one({'_id': ObjectId(request_id_str)})
+        except Exception: return None
 
-    def put(self, request, pk, *args, **kwargs): # pk là request_id
+    # --- Sửa lại PUT để chỉ cập nhật status/notes ---
+    def put(self, request, pk, *args, **kwargs):
         print(f"[AdminSongRequestDetailView PUT] Request for request_id: {pk}")
-        if not db: return Response({"error": "Lỗi DB."}, status=500)
+        if not db: return Response({"error": "Lỗi DB."}, 500)
 
-        song_request = self.get_object(pk)
+        try:
+            request_id = ObjectId(pk)
+        except Exception:
+            return Response({"detail": "ID yêu cầu không hợp lệ."}, status=400)
+
+        song_request = db.song_requests.find_one({'_id': request_id}) # Lấy object gốc
         if not song_request:
-             return Response({"detail": "Không tìm thấy yêu cầu."}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"detail": "Không tìm thấy yêu cầu."}, status=404)
 
-        # Dữ liệu admin gửi lên (chỉ cần status và admin_notes)
         new_status = request.data.get('status')
-        admin_notes = request.data.get('admin_notes', None) # Ghi chú của admin
+        admin_notes = request.data.get('admin_notes', None) # Có thể là None hoặc string
 
-        # Validate trạng thái mới
-        allowed_statuses = ['approved', 'rejected', 'added'] # Admin chỉ nên đổi sang các trạng thái này
+        allowed_statuses = ['approved', 'rejected', 'added']
         if new_status not in allowed_statuses:
-             return Response({"status": [f"Trạng thái không hợp lệ. Chỉ chấp nhận: {', '.join(allowed_statuses)}."]}, status=status.HTTP_400_BAD_REQUEST)
+             return Response({"status": [f"Trạng thái không hợp lệ. Chỉ chấp nhận: {', '.join(allowed_statuses)}."]}, status=400)
 
-        # Chuẩn bị dữ liệu cập nhật
+        # Dữ liệu cập nhật
         update_data = {
             'status': new_status,
-            'processed_at': datetime.utcnow(), # Ghi lại thời gian xử lý
+            'processed_at': datetime.utcnow(),
         }
-        if admin_notes is not None: # Chỉ cập nhật nếu admin có gửi ghi chú
+        # Chỉ cập nhật admin_notes nếu nó được gửi và khác None
+        # Nếu muốn xóa admin_notes, client cần gửi admin_notes="" hoặc null? Cần thống nhất.
+        # Ví dụ: chỉ cập nhật nếu khác None
+        if admin_notes is not None:
              update_data['admin_notes'] = admin_notes
+        # Hoặc nếu muốn cho phép xóa:
+        # if 'admin_notes' in request.data: # Kiểm tra xem key có được gửi không
+        #     update_data['admin_notes'] = request.data['admin_notes'] # Lưu giá trị gửi lên (có thể là null/rỗng)
+
 
         try:
             result = db.song_requests.update_one(
-                {'_id': ObjectId(pk)},
+                {'_id': request_id},
                 {'$set': update_data}
             )
 
             if result.matched_count == 0:
-                 # Trường hợp hiếm gặp: request bị xóa ngay trước khi update
-                 return Response({"detail": "Không tìm thấy yêu cầu để cập nhật."}, status=status.HTTP_404_NOT_FOUND)
+                 return Response({"detail": "Không tìm thấy yêu cầu để cập nhật."}, status=404)
 
             print(f"[AdminSongRequestDetailView PUT] Updated request {pk} status to '{new_status}'")
 
-            # Fetch lại request đã cập nhật để trả về
-            updated_request = self.get_object(pk)
-            # Serialize lại (cần đảm bảo serializer xử lý ObjectId)
-            updated_request['_id'] = str(updated_request['_id'])
-            if 'user_id' in updated_request: updated_request['user_id'] = str(updated_request['user_id'])
+            # Fetch lại dữ liệu đã cập nhật (bao gồm $lookup user) để trả về
+            pipeline_detail = [
+                 {'$match': {'_id': request_id}},
+                 {'$lookup': { 'from': 'users', 'localField': 'user_id', 'foreignField': '_id', 'as': 'user_details'}},
+                 {'$unwind': {'path': '$user_details', 'preserveNullAndEmptyArrays': True}},
+                 {'$project': {
+                     'song_title': 1, 'artist_name': 1, 'album_name': 1, 'notes': 1,
+                     'requested_at': 1, 'status': 1, 'processed_at': 1, 'admin_notes': 1,
+                     'user_id': 1,
+                     'user': {'$cond': {'if': '$user_details', 'then': {'_id': '$user_details._id', 'username': '$user_details.username'}, 'else': None }}
+                 }}
+             ]
+            updated_request_agg = list(db.song_requests.aggregate(pipeline_detail))
 
-            # Dùng lại SongRequestSerializer hoặc tạo serializer riêng
-            serializer = SongRequestSerializer(updated_request)
-            return Response(serializer.data)
+            if updated_request_agg:
+                serializer = AdminSongRequestSerializer(updated_request_agg[0], context={'request': request}) # Dùng serializer mới
+                return Response(serializer.data)
+            else:
+                # Nếu không tìm thấy sau khi update (lạ)
+                return Response({"error": "Could not retrieve updated request."}, 500)
+
 
         except Exception as e:
              print(f"ERROR [AdminSongRequestDetailView PUT] Failed to update request {pk}: {e}")
-             return Response({"error": "Không thể cập nhật yêu cầu."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+             return Response({"error": "Không thể cập nhật yêu cầu."}, 500)
