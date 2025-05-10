@@ -128,7 +128,12 @@ class UserSerializer(BaseMediaURLSerializer):
     is_active = serializers.BooleanField(default=True, read_only=False) # Ví dụ: Chỉ đọc
     # -------------------------
 
-    # favourite_songs = serializers.ListField(child=ObjectIdField(), required=False, default=list) # Tùy chọn
+    favourite_songs = serializers.ListField(
+        child=ObjectIdField(), # Danh sách các ObjectId của bài hát
+        required=False,
+        default=list,
+        read_only=True # <<< Tạm đặt read_only, việc thêm/xóa sẽ qua API riêng
+    )
 
     def get_profile_picture_url(self, obj):
         # Lấy từ trường 'profile_picture' (chứa path) trong document MongoDB
@@ -578,8 +583,19 @@ class ChangePasswordSerializer(serializers.Serializer):
     # Không cần hàm create
     # Hàm save (hoặc update nếu bạn muốn) sẽ xử lý logic chính
 
-class SongRequestSerializer(serializers.Serializer):
-    song_title = serializers.CharField(max_length=255, required=True, error_messages={'required': 'Vui lòng nhập tên bài hát.'})
+class SongRequestBaseSerializer(serializers.Serializer): # Lớp cơ sở để dùng chung
+    song_title = serializers.CharField(max_length=255, required=True)
     artist_name = serializers.CharField(max_length=100, required=False, allow_blank=True)
     album_name = serializers.CharField(max_length=100, required=False, allow_blank=True)
     notes = serializers.CharField(max_length=500, required=False, allow_blank=True, style={'base_template': 'textarea.html'})
+
+class AdminSongRequestSerializer(SongRequestBaseSerializer): # Kế thừa và thêm trường
+    """Serializer để hiển thị và cập nhật Song Requests trong Admin."""
+    _id = ObjectIdField(read_only=True)
+    # Hiển thị user_id dạng string, hoặc lồng username nếu có $lookup
+    user_id = ObjectIdField(read_only=True) # Hoặc dùng SerializerMethodField để lấy username
+    username = serializers.CharField(source='user.username', read_only=True, default='N/A') # <<< Giả sử có user lồng nhau
+    requested_at = serializers.DateTimeField(read_only=True)
+    status = serializers.CharField(read_only=True) # Status chỉ đọc ở GET list, cập nhật qua PUT riêng
+    processed_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    admin_notes = serializers.CharField(read_only=True, allow_blank=True, allow_null=True)
