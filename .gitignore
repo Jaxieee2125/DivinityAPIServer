@@ -6,6 +6,7 @@ __pycache__/
 *.swp
 *~
 .DS_Store
+MusicApi/__pycache__/
 
 # Virtual environment
 venv/
@@ -18,10 +19,11 @@ db.sqlite3-journal
 
 # Media files (if you have user uploads)
 media/
+mediafiles/
 
 # Static files (collected static files)
 static/
-mediafiles/
+
 
 # Secret Key and other sensitive information
 # Put your actual secret key and database credentials in a .env file
