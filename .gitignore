@@ -21,6 +21,7 @@ media/
 
 # Static files (collected static files)
 static/
+mediafiles/
 
 # Secret Key and other sensitive information
 # Put your actual secret key and database credentials in a .env file

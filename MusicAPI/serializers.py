@@ -128,7 +128,12 @@ class UserSerializer(BaseMediaURLSerializer):
     is_active = serializers.BooleanField(default=True, read_only=False) # Ví dụ: Chỉ đọc
     # -------------------------
 
-    # favourite_songs = serializers.ListField(child=ObjectIdField(), required=False, default=list) # Tùy chọn
+    favourite_songs = serializers.ListField(
+        child=ObjectIdField(), # Danh sách các ObjectId của bài hát
+        required=False,
+        default=list,
+        read_only=True # <<< Tạm đặt read_only, việc thêm/xóa sẽ qua API riêng
+    )
 
     def get_profile_picture_url(self, obj):
         # Lấy từ trường 'profile_picture' (chứa path) trong document MongoDB

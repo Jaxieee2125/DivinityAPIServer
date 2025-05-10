@@ -61,6 +61,8 @@ urlpatterns = [
     path('home/library-highlights/', views.LibraryHighlightsView.as_view(), name='home-library-highlights'),
     path('home/new-releases/', views.RecentlyAddedReleasesView.as_view(), name='home-new-releases'),
     path('song-requests/', views.SongRequestView.as_view(), name='song-request'),
+    path('user/favourites/toggle/<str:song_id_str>/', views.ToggleUserFavouriteSongView.as_view(), name='user-toggle-song-favourite'),
+    path('user/favourites/status/', views.CheckUserFavouriteStatusView.as_view(), name='user-check-songs-favourite-status'),
 ]
 
 

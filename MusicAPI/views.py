@@ -2830,3 +2830,90 @@ class AdminSongRequestDetailView(APIView):
         except Exception as e:
              print(f"ERROR [AdminSongRequestDetailView PUT] Failed to update request {pk}: {e}")
              return Response({"error": "Không thể cập nhật yêu cầu."}, 500)
+         
+class ToggleUserFavouriteSongView(APIView):
+    permission_classes = [IsAuthenticated] # <<< CHỈ USER ĐÃ ĐĂNG NHẬP
+
+    def post(self, request, song_id_str): # pk ở đây là song_id
+        if not db: return Response({"error": "Database connection failed"}, 500)
+
+        user_id_from_token = getattr(request.user, 'user_mongo_id', None) or \
+                             getattr(request.user, 'id', None)
+        if not user_id_from_token:
+            return Response({"detail": "User not authenticated"}, status=401)
+
+        try:
+            song_id_obj = ObjectId(song_id_str)
+            user_id_obj = ObjectId(user_id_from_token)
+        except Exception:
+            return Response({"detail": "Invalid song ID or user ID format."}, status=400)
+
+        # Kiểm tra bài hát có tồn tại không
+        song_exists = db.songs.count_documents({'_id': song_id_obj}, limit=1) > 0
+        if not song_exists:
+            return Response({"detail": "Song not found."}, status=404)
+
+        user_doc = db.users.find_one({'_id': user_id_obj})
+        if not user_doc:
+            return Response({"detail": "User not found."}, status=404) # Lỗi không nên xảy ra nếu token hợp lệ
+
+        current_favourites = user_doc.get('favourite_songs', [])
+        is_favourited_now = False
+
+        if song_id_obj in current_favourites:
+            # Đã yêu thích -> Bỏ yêu thích (dùng $pull)
+            db.users.update_one(
+                {'_id': user_id_obj},
+                {'$pull': {'favourite_songs': song_id_obj}}
+            )
+            message = "Song removed from favourites."
+            is_favourited_now = False
+        else:
+            # Chưa yêu thích -> Thêm yêu thích (dùng $addToSet để tránh trùng lặp)
+            db.users.update_one(
+                {'_id': user_id_obj},
+                {'$addToSet': {'favourite_songs': song_id_obj}}
+                # Có thể thêm logic giới hạn số lượng bài yêu thích nếu muốn
+            )
+            message = "Song added to favourites."
+            is_favourited_now = True
+
+        return Response({"message": message, "is_favourited": is_favourited_now})
+
+
+class CheckUserFavouriteStatusView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not db: return Response({"error": "Database connection failed"}, 500)
+        user_id_from_token = getattr(request.user, 'user_mongo_id', None) or \
+                             getattr(request.user, 'id', None)
+        if not user_id_from_token: return Response({"detail": "User not authenticated"}, status=401)
+
+        song_ids_str = request.query_params.get('song_ids', '')
+        if not song_ids_str:
+            return Response({"error": "song_ids parameter is required."}, status=400)
+
+        try:
+            user_id_obj = ObjectId(user_id_from_token)
+            # Chuyển các chuỗi song_id từ query param thành list các ObjectId
+            song_ids_list_obj = [ObjectId(s_id.strip()) for s_id in song_ids_str.split(',') if ObjectId.is_valid(s_id.strip())]
+        except Exception:
+            return Response({"detail": "Invalid song ID or user ID format."}, status=400)
+
+        if not song_ids_list_obj:
+             return Response({"error": "No valid song_ids provided."}, status=400)
+
+        # Lấy document user
+        user_doc = db.users.find_one({'_id': user_id_obj}, {'favourite_songs': 1}) # Chỉ lấy trường favourite_songs
+        if not user_doc:
+            return Response({"detail": "User not found."}, status=404)
+
+        favourited_by_user = user_doc.get('favourite_songs', []) # Đây là mảng các ObjectId
+
+        # Tạo response map
+        status_map = {}
+        for s_id_obj in song_ids_list_obj:
+            status_map[str(s_id_obj)] = (s_id_obj in favourited_by_user)
+
+        return Response(status_map)
