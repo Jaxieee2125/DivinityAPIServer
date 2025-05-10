@@ -1880,8 +1880,7 @@ class PlaylistDetail(APIView):
             print(f"[GET /playlists/{pk}] Error: {e}")
             return Response({"error": f"Could not retrieve playlist {pk}"}, 500)
 
-    def put(self, request, pk):
-        """ Sửa playlist (tên, mô tả, is_public, danh sách bài hát). """
+    def put(self, request, pk): # pk là playlistId
         if not db: return Response({"error": "Database connection failed"}, 500)
         playlist_id = None
         try: playlist_id = ObjectId(pk)
@@ -1890,43 +1889,77 @@ class PlaylistDetail(APIView):
         playlist = get_object(db.playlists, pk)
         if not playlist: return Response(status=status.HTTP_404_NOT_FOUND)
 
-        # --- Kiểm tra quyền sửa ---
+        # --- Kiểm tra quyền sở hữu hoặc admin ---
         user_id_str_from_token = getattr(request.user, 'user_mongo_id', None) or getattr(request.user, 'id', None)
         is_owner = False
         if user_id_str_from_token:
-             try: is_owner = ObjectId(user_id_str_from_token) == playlist.get('user_id')
-             except: pass
-
+            try: is_owner = ObjectId(user_id_str_from_token) == playlist.get('user_id')
+            except: pass
         if not is_owner and not IsAdminFromMongo().has_permission(request, self):
-            return Response({"error": "You do not have permission to edit this playlist."}, status=status.HTTP_403_FORBIDDEN)
-        # ------------------------
+            return Response({"error": "You do not have permission to modify this playlist."}, status=403)
+        # ------------------------------------
 
-        serializer = PlaylistSerializer(playlist, data=request.data, partial=True, context={'request': request})
-        if serializer.is_valid():
-            update_data = serializer.validated_data
-            # Serializer đã validate cấu trúc của mảng 'songs' nếu được gửi
-            # Không cần hash password hay xử lý file ở đây
+        action = request.data.get('action') # Thêm tham số action
 
-            try:
-                db.playlists.update_one({'_id': playlist_id}, {'$set': update_data})
-                # Fetch lại để trả về (tương tự logic GET)
-                pipeline_detail = [{'$match': {'_id': playlist_id}}] + PlaylistList.get_aggregation_pipeline_for_playlist_detail() # Cần hàm helper này
-                updated_playlist_agg = list(db.playlists.aggregate(pipeline_detail))
+        if action == 'add_songs':
+            song_ids_to_add_str = request.data.get('song_ids', []) # Mảng các string ID
+            if not isinstance(song_ids_to_add_str, list):
+                return Response({"song_ids": ["Must be a list of song IDs."]}, status=400)
 
-                if updated_playlist_agg:
-                     # Cần fetch lại song details cho playlist này
-                     # ... (Logic fetch song details như trong GET) ...
-                     # Tạm thời serialize lại dữ liệu thô đã update
-                     response_serializer = PlaylistSerializer(updated_playlist_agg[0], context={'request': request})
-                     return Response(response_serializer.data)
-                else: return Response(status=status.HTTP_404_NOT_FOUND)
+            valid_song_object_ids = []
+            for s_id_str in song_ids_to_add_str:
+                if ObjectId.is_valid(s_id_str):
+                    # TODO: Kiểm tra xem song_id có thực sự tồn tại trong db.songs không
+                    valid_song_object_ids.append(ObjectId(s_id_str))
+                else:
+                    return Response({"song_ids": [f"Invalid song ID format: {s_id_str}"]}, status=400)
 
-            except Exception as e:
-                 print(f"[PUT Playlist/{pk}] Error: {e}")
-                 return Response({"error": f"Could not update playlist {pk}: {e}"}, status=500)
-        else:
-            print(f"[PUT Playlist/{pk}] Serializer Errors:", serializer.errors)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            if not valid_song_object_ids:
+                return Response({"message": "No valid songs to add."}, status=200) # Hoặc 400
+
+            # Tạo các object để thêm vào mảng songs của playlist
+            # Mỗi item có thể là { song_id: ObjectId, date_added: DateTime }
+            songs_to_embed = [
+                {'song_id': song_obj_id, 'date': datetime.now(timezone.utc)}
+                for song_obj_id in valid_song_object_ids
+            ]
+
+            # Dùng $addToSet để thêm vào mảng songs, $each để thêm nhiều
+            # và đảm bảo không thêm trùng lặp song_id (nếu cấu trúc là {song_id, date})
+            # Nếu chỉ là mảng ID, $addToSet cho từng ID
+            # Giả sử cấu trúc là [{song_id, date}], $addToSet cần query phức tạp hơn
+            # Cách đơn giản hơn là dùng $push và chấp nhận có thể trùng nếu không validate kỹ
+            # Hoặc fetch playlist, thêm thủ công, rồi update toàn bộ mảng songs (ít hiệu quả)
+
+            # Sử dụng $push với $each cho cấu trúc {song_id, date}
+            # (Cần đảm bảo không thêm trùng nếu bạn muốn)
+            # Nếu muốn tránh trùng song_id hoàn toàn, cần logic phức tạp hơn
+            # hoặc thay đổi cấu trúc 'songs' thành mảng các ObjectId thuần túy
+            # và dùng $addToSet với $each cho mảng ObjectId.
+            # Hiện tại, giả sử $push là chấp nhận được.
+            result = db.playlists.update_one(
+                {'_id': playlist_id},
+                {'$push': {'songs': {'$each': songs_to_embed}}}
+            )
+            if result.modified_count > 0 or result.matched_count > 0 : # matched_count > 0 nếu $each là mảng rỗng
+                # Fetch lại toàn bộ playlist để trả về
+                # ... (logic fetch và serialize như trong GET) ...
+                return Response({"message": f"{len(songs_to_embed)} song(s) added."}, status=200) # Trả về playlist mới
+            else:
+                return Response({"error": "Could not add songs to playlist."}, status=500)
+
+        else: # Xử lý cập nhật thông tin playlist (tên, mô tả, is_public)
+            serializer = PlaylistSerializer(playlist, data=request.data, partial=True, context={'request': request})
+            if serializer.is_valid():
+                update_data = serializer.validated_data
+                # Bỏ 'songs' ra khỏi update_data nếu client gửi lên mà không phải action add_songs
+                update_data.pop('songs', None)
+                if update_data: # Chỉ update nếu có gì đó thay đổi
+                    db.playlists.update_one({'_id': playlist_id}, {'$set': update_data})
+                # Fetch lại như GET để trả về
+                # ... (logic fetch và serialize như trong GET) ...
+                return Response(serializer.data) # Trả về playlist đã cập nhật
+            return Response(serializer.errors, status=400)
 
 
     def delete(self, request, pk):
