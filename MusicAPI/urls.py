@@ -64,6 +64,7 @@ urlpatterns = [
     path('user/favourites/toggle/<str:song_id_str>/', views.ToggleUserFavouriteSongView.as_view(), name='user-toggle-song-favourite'),
     path('user/favourites/status/', views.CheckUserFavouriteStatusView.as_view(), name='user-check-songs-favourite-status'),
     path('user/song-requests/', views.UserSongRequestListView.as_view(), name='user-song-request-list'),
+    path('user/liked-songs/', views.UserFavouriteSongsView.as_view(), name='user-liked-songs'),
 ]
 
 

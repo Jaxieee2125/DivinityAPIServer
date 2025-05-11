@@ -3038,3 +3038,57 @@ class UserSongRequestListView(APIView):
         except Exception as e:
             print(f"ERROR [UserSongRequestListView GET]: {e}")
             return Response({"error": "Không thể lấy danh sách yêu cầu của bạn."}, status=500)
+        
+class UserFavouriteSongsView(APIView):
+    permission_classes = [IsAuthenticated] # Chỉ user đã đăng nhập
+    _get_song_pipeline_stages = staticmethod(get_song_aggregation_pipeline) # Tái sử dụng
+
+    def get(self, request):
+        if not db: return Response({"error": "Database connection failed"}, 500)
+
+        user_id_from_token = getattr(request.user, 'user_mongo_id', None) or \
+                             getattr(request.user, 'id', None)
+        if not user_id_from_token:
+            return Response({"detail": "User not authenticated"}, status=401)
+
+        try:
+            user_object_id = ObjectId(user_id_from_token)
+        except Exception:
+            return Response({"detail": "Invalid user ID in token."}, status=400)
+
+        user_doc = db.users.find_one({'_id': user_object_id}, {'favourite_songs': 1})
+        if not user_doc:
+            return Response({"error": "User not found."}, status=404)
+
+        favourite_song_ids = user_doc.get('favourite_songs', [])
+        if not favourite_song_ids:
+            return Response([]) # Trả về mảng rỗng nếu không có bài hát yêu thích
+
+        try:
+            # --- Fetch chi tiết các bài hát yêu thích ---
+            match_stage = {'$match': {'_id': {'$in': favourite_song_ids}}}
+            # Có thể thêm sort ở đây nếu muốn (vd: theo tên, theo ngày like - nếu lưu ngày like)
+            # sort_stage = {'$sort': {'song_name': 1}}
+            pipeline = [match_stage] + self._get_song_pipeline_stages() # + [sort_stage]
+
+            liked_songs_details = list(db.songs.aggregate(pipeline))
+            # ---------------------------------------------
+
+            # Sắp xếp lại theo thứ tự trong mảng favourite_songs của user (nếu muốn)
+            # (MongoDB $in không đảm bảo thứ tự)
+            # Hoặc bạn có thể thêm trường 'liked_at' vào mảng favourite_songs của user và sort theo đó
+            ordered_songs = []
+            if liked_songs_details:
+                songs_map = {str(s['_id']): s for s in liked_songs_details}
+                for song_id_obj in favourite_song_ids: # Lặp qua ID gốc để giữ thứ tự user đã like
+                    if str(song_id_obj) in songs_map:
+                        ordered_songs.append(songs_map[str(song_id_obj)])
+
+            serializer = SongSerializer(ordered_songs, many=True, context={'request': request})
+            # Nếu cần pagination cho trang Liked Songs (thường không quá nhiều)
+            # return Response({'count': len(ordered_songs), 'results': serializer.data})
+            return Response(serializer.data) # Trả về mảng trực tiếp
+
+        except Exception as e:
+            print(f"Error fetching liked songs for user {user_object_id}: {e}")
+            return Response({"error": "Could not retrieve liked songs."}, status=500)
