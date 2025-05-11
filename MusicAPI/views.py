@@ -1947,6 +1947,36 @@ class PlaylistDetail(APIView):
                 return Response({"message": f"{len(songs_to_embed)} song(s) added."}, status=200) # Trả về playlist mới
             else:
                 return Response({"error": "Could not add songs to playlist."}, status=500)
+            
+        elif action == 'remove_song':
+            song_id_to_remove_str = request.data.get('song_id')
+            if not song_id_to_remove_str or not ObjectId.is_valid(song_id_to_remove_str):
+                return Response({"song_id": ["Valid song ID to remove is required."]}, status=400)
+
+            try:
+                song_id_obj_to_remove = ObjectId(song_id_to_remove_str)
+                # Xóa tất cả các instance của bài hát này khỏi mảng songs
+                # (nếu cấu trúc songs là [{song_id, date_added}, ...])
+                result = db.playlists.update_one(
+                    {'_id': playlist_id},
+                    {'$pull': {'songs': {'song_id': song_id_obj_to_remove}}}
+                )
+                # Nếu mảng songs chỉ chứa ObjectId:
+                # result = db.playlists.update_one(
+                #     {'_id': playlist_id},
+                #     {'$pull': {'songs': song_id_obj_to_remove}}
+                # )
+
+                if result.modified_count > 0:
+                    # Fetch lại và trả về playlist đã cập nhật
+                    # ... (logic fetch và serialize như trong GET) ...
+                    return Response({"message": "Song removed from playlist."}, status=200)
+                else:
+                    # Có thể bài hát không có trong playlist hoặc có lỗi khác
+                    return Response({"message": "Song not found in playlist or no changes made."}, status=200) # Hoặc 404 nếu muốn
+            except Exception as e:
+                print(f"[PUT Playlist/{pk} remove_song] Error: {e}")
+                return Response({"error": "Could not remove song from playlist."}, status=500)
 
         else: # Xử lý cập nhật thông tin playlist (tên, mô tả, is_public)
             serializer = PlaylistSerializer(playlist, data=request.data, partial=True, context={'request': request})
