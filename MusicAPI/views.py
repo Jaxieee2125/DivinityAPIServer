@@ -1947,6 +1947,36 @@ class PlaylistDetail(APIView):
                 return Response({"message": f"{len(songs_to_embed)} song(s) added."}, status=200) # Trả về playlist mới
             else:
                 return Response({"error": "Could not add songs to playlist."}, status=500)
+            
+        elif action == 'remove_song':
+            song_id_to_remove_str = request.data.get('song_id')
+            if not song_id_to_remove_str or not ObjectId.is_valid(song_id_to_remove_str):
+                return Response({"song_id": ["Valid song ID to remove is required."]}, status=400)
+
+            try:
+                song_id_obj_to_remove = ObjectId(song_id_to_remove_str)
+                # Xóa tất cả các instance của bài hát này khỏi mảng songs
+                # (nếu cấu trúc songs là [{song_id, date_added}, ...])
+                result = db.playlists.update_one(
+                    {'_id': playlist_id},
+                    {'$pull': {'songs': {'song_id': song_id_obj_to_remove}}}
+                )
+                # Nếu mảng songs chỉ chứa ObjectId:
+                # result = db.playlists.update_one(
+                #     {'_id': playlist_id},
+                #     {'$pull': {'songs': song_id_obj_to_remove}}
+                # )
+
+                if result.modified_count > 0:
+                    # Fetch lại và trả về playlist đã cập nhật
+                    # ... (logic fetch và serialize như trong GET) ...
+                    return Response({"message": "Song removed from playlist."}, status=200)
+                else:
+                    # Có thể bài hát không có trong playlist hoặc có lỗi khác
+                    return Response({"message": "Song not found in playlist or no changes made."}, status=200) # Hoặc 404 nếu muốn
+            except Exception as e:
+                print(f"[PUT Playlist/{pk} remove_song] Error: {e}")
+                return Response({"error": "Could not remove song from playlist."}, status=500)
 
         else: # Xử lý cập nhật thông tin playlist (tên, mô tả, is_public)
             serializer = PlaylistSerializer(playlist, data=request.data, partial=True, context={'request': request})
@@ -2950,3 +2980,61 @@ class CheckUserFavouriteStatusView(APIView):
             status_map[str(s_id_obj)] = (s_id_obj in favourited_by_user)
 
         return Response(status_map)
+    
+class UserSongRequestListView(APIView):
+    """ API endpoint cho User xem danh sách các yêu cầu bài hát của CHÍNH HỌ. """
+    permission_classes = [IsAuthenticated] # <<< Bắt buộc đăng nhập
+
+    def get(self, request, *args, **kwargs):
+        if not db: return Response({"error": "Lỗi DB."}, 500)
+
+        user_id_from_token = getattr(request.user, 'user_mongo_id', None) or \
+                             getattr(request.user, 'id', None)
+        if not user_id_from_token:
+            # Lỗi này không nên xảy ra nếu IsAuthenticated hoạt động
+            return Response({"detail": "User not properly authenticated"}, status=400)
+
+        try:
+            user_object_id = ObjectId(user_id_from_token)
+        except Exception:
+             return Response({"detail": "Invalid user ID in token."}, status=400)
+
+        # Lọc theo user_id của người dùng hiện tại
+        filter_query = {'user_id': user_object_id}
+
+        # Lọc thêm theo trạng thái nếu có (tùy chọn)
+        query_status = request.query_params.get('status', None)
+        if query_status and query_status in ['pending', 'approved', 'rejected', 'added']:
+            filter_query['status'] = query_status
+
+        sort_query = [('requested_at', -1)] # Mới nhất trước
+
+        # TODO: Pagination nếu cần
+        try:
+            requests_cursor = db.song_requests.find(filter_query).sort(sort_query)
+            requests_list = list(requests_cursor)
+
+            # Không cần $lookup user ở đây nữa vì chúng ta biết user_id rồi
+            # Nhưng AdminSongRequestSerializer có thể mong đợi trường 'user.username'
+            # Chúng ta sẽ không truyền 'user' vào đây, hoặc sửa serializer
+            # Để đơn giản, chúng ta sẽ không hiển thị 'Requested By' ở trang này
+
+            # Tạm thời dùng lại AdminSongRequestSerializer, nhưng có thể tạo UserSongRequestSerializer riêng
+            # nếu không muốn hiển thị admin_notes hoặc các trường admin khác
+            serializer = AdminSongRequestSerializer(requests_list, many=True, context={'request': request})
+            # Loại bỏ các trường admin không cần thiết nếu dùng chung serializer
+            # Hoặc tạo UserSongRequestSerializer chỉ có các trường user cần xem
+
+            # Ví dụ loại bỏ admin_notes thủ công (không lý tưởng)
+            # serialized_data = []
+            # for item in serializer.data:
+            #     item.pop('admin_notes', None) # Bỏ admin_notes
+            #     item.pop('user', None) # Bỏ user object nếu có, chỉ cần user_id
+            #     serialized_data.append(item)
+
+            total_count = db.song_requests.count_documents(filter_query)
+            return Response({'count': total_count, 'results': serializer.data}) # Hoặc serialized_data
+
+        except Exception as e:
+            print(f"ERROR [UserSongRequestListView GET]: {e}")
+            return Response({"error": "Không thể lấy danh sách yêu cầu của bạn."}, status=500)
