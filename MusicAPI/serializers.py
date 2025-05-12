@@ -244,6 +244,7 @@ class SongSerializer(BaseMediaURLSerializer):
     lyrics = serializers.CharField(required=False, allow_blank=True) # Assuming text field
     release_time = serializers.DateTimeField(required=False, allow_null=True) # Date or DateTime?
     duration_song = serializers.IntegerField(required=False, allow_null=True) # Duration in seconds?
+    musicgenre_ids = serializers.ListField(child=ObjectIdField(), required=False) # List of ObjectId(s)
     # Read-only calculated fields?
     number_of_plays = serializers.IntegerField(required=False, read_only=True, default=0)
     number_of_likes = serializers.IntegerField(required=False, read_only=True, default=0)
