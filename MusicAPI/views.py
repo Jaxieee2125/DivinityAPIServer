@@ -1289,11 +1289,12 @@ def get_song_aggregation_pipeline():
         { '$lookup': { 'from': 'albums', 'localField': 'album_id', 'foreignField': '_id', 'as': 'album_details' } },
         { '$unwind': { 'path': '$album_details', 'preserveNullAndEmptyArrays': True } },
         { '$project': {
-            '_id': 1, # Đảm bảo trả về _id
-            'song_name': 1, 'description': 1, 'lyrics': 1, 'release_time': 1, 'duration_song': 1,
+            '_id': 1, 
+            'song_name': 1, 'description': 1, 'lyrics': 1, 'release_time': 1, 'duration_song': 1, 'musicgenre_ids': 1,
             'number_of_plays': 1, 'number_of_likes': 1, 'file_up': 1, 'status': 1,
-            'artist_ids': 1, # Giữ lại ID nếu cần dùng ở đâu đó
-            'album_id': 1,   # Giữ lại ID nếu cần dùng ở đâu đó
+            'artist_ids': 1, 
+            'album_id': 1,   
+            
             'artists': { '$map': {
                 'input': '$artist_details', 'as': 'artist',
                 'in': { '_id': '$$artist._id', 'artist_name': '$$artist.artist_name', 'artist_avatar': '$$artist.artist_avatar' }
@@ -1302,7 +1303,7 @@ def get_song_aggregation_pipeline():
                 'if': '$album_details',
                 'then': { '_id': '$album_details._id', 'album_name': '$album_details.album_name', 'image': '$album_details.image' },
                 'else': None
-            }}
+            }},         
         }}
     ]
 
@@ -1513,6 +1514,19 @@ class SongDetail(APIView):
             # Nếu gửi key 'artist_ids' thì phải có ít nhất 1 ID hợp lệ
             if not valid_artist_ids: return Response({"artist_ids": ["At least one valid Artist ID is required if 'artist_ids' key is provided."]}, status=400)
             data_for_serializer['artist_ids'] = valid_artist_ids # Gán lại list ObjectId
+            
+        # Xử lý artist_ids nếu được gửi lên
+        if 'musicgenre_ids' in mutable_post_data:
+            musicgenre_id_list_str = mutable_post_data.getlist('musicgenre_ids')
+            valid_musicgenre_ids = []
+            for mid_str in musicgenre_id_list_str:
+                mid_str = mid_str.strip()
+                if not mid_str: continue
+                try: valid_musicgenre_ids.append(ObjectId(mid_str))
+                except Exception as e: return Response({"musicgenre_ids": [f"Invalid ObjectId format provided: '{mid_str}'"]}, status=400)
+            # Nếu gửi key 'artist_ids' thì phải có ít nhất 1 ID hợp lệ
+            if not valid_artist_ids: return Response({"musicgenre_ids": ["At least one valid Artist ID is required if 'musicgenre_ids' key is provided."]}, status=400)
+            data_for_serializer['musicgenre_ids'] = valid_musicgenre_ids # Gán lại list ObjectId
 
         # Xử lý album_id nếu được gửi lên
         if 'album_id' in data_for_serializer:
