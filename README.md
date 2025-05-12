@@ -45,8 +45,8 @@
 
 1.  **Clone Repository:**
     ```bash
-    git clone https://github.com/Jaxieee2125/DivinityMusicServer.git # <<< THAY BẰNG URL REPO SERVER CỦA BẠN
-    cd DivinityMusicServer # <<< THAY BẰNG TÊN THƯ MỤC CỦA BẠN
+    git clone https://github.com/Jaxieee2125/DivinityAPIServer.git
+    cd DivinityAPIServer
     ```
 
 2.  **Tạo và Kích hoạt Môi trường ảo:**
