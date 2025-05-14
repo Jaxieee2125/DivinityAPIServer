@@ -28,7 +28,7 @@ SECRET_KEY = 'django-insecure-5s4_o%50io&vp_3#keu!2yh5nh-og$b(hhsh^0jq(yq)pm4di6
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['*'] # Cho phép tất cả host, chỉ dùng cho phát triển
 
 
 # Application definition
@@ -132,7 +132,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 CORS_ALLOW_ALL_ORIGINS = True
 
-MEDIA_URL = '/media/'
+NGROK_DOMAIN = None # Thay thế bằng domain ngrok của bạn
+if DEBUG and NGROK_DOMAIN: # Chỉ làm điều này khi DEBUG và có domain ngrok
+    MEDIA_URL = f'https://{NGROK_DOMAIN}/media/'
+else:
+    MEDIA_URL = '/media/'
+
 MEDIA_ROOT = os.path.join(BASE_DIR, 'Storage')
 
 if not os.path.exists(MEDIA_ROOT):

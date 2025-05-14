@@ -1346,6 +1346,7 @@ class SongList(APIView):
 
         # Luôn lấy artist_ids bằng getlist để đảm bảo là list
         artist_id_list_str = mutable_post_data.getlist('artist_ids')
+        musicgenre_id_list_str = mutable_post_data.getlist('musicgenre_ids') # Nếu có
         print(f"[POST] Received artist_ids from POST.getlist: {artist_id_list_str}") # DEBUG
 
         # Validate và chuyển đổi ObjectId cho artist_ids
@@ -1358,13 +1359,23 @@ class SongList(APIView):
             except Exception as e:
                 print(f"[POST] Invalid Artist ObjectId received: '{aid_str}' - Error: {e}")
                 return Response({"artist_ids": [f"Invalid ObjectId format provided: '{aid_str}'"]}, status=status.HTTP_400_BAD_REQUEST)
+            
+        valid_musicgenre_ids = []
+        for mid_str in musicgenre_id_list_str:
+            mid_str = mid_str.strip()
+            if not mid_str: continue
+            try: valid_musicgenre_ids.append(ObjectId(mid_str))
+            except Exception as e: return Response({"musicgenre_ids": [f"Invalid ObjectId format provided: '{mid_str}'"]}, status=400)
 
         if not valid_artist_ids:
              return Response({"artist_ids": ["At least one valid Artist ID is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        if not valid_musicgenre_ids:
+             return Response({"musicgenre_ids": ["At least one valid Music Genre ID is required."]}, status=status.HTTP_400_BAD_REQUEST)
 
         # Tạo dictionary dữ liệu để đưa vào serializer
         data_for_serializer = mutable_post_data.dict()
         data_for_serializer['artist_ids'] = valid_artist_ids # Gán list ObjectId đã validate
+        data_for_serializer['musicgenre_ids'] = valid_musicgenre_ids # Gán list ObjectId đã validate
 
         # Validate và chuyển đổi album_id (nếu có)
         album_id_str = data_for_serializer.get('album_id', '').strip()
@@ -1375,6 +1386,8 @@ class SongList(APIView):
                  return Response({"album_id": [f"Invalid ObjectId format provided: '{album_id_str}'"]}, status=400)
         else:
             data_for_serializer['album_id'] = None # Đặt là None nếu rỗng
+            
+        
 
         # Thêm file vào data (để serializer có thể validate nếu 'required=True')
         if 'audio_file' in request.FILES:
