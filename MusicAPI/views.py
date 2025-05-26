@@ -40,10 +40,8 @@ import re
 
 # --- MongoDB Connection (Giả sử cấu hình ở đây hoặc import từ nơi khác) ---
 try:
-    # Thay thế bằng connection string của bạn nếu cần
     client = MongoClient('mongodb://localhost:27017/')
-    # Thay thế 'MusicServer' bằng tên database của bạn
-    db = client['MusicDatabase']
+    db = client['MusicDatabase'] # <<< THAY 'MusicDatabase' bằng tên DB của bạn
     # Kiểm tra kết nối (tùy chọn)
     client.admin.command('ping')
     print("MongoDB connected successfully!")

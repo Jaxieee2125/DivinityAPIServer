@@ -1,0 +1,13 @@
+[{
+  "_id": {
+    "$oid": "68349718dc3e8abd81e1958c"
+  },
+  "user_id": {
+    "$oid": "68349716dc3e8abd81e1958b"
+  },
+  "username": "admin",
+  "password": "pbkdf2_sha256$1000000$tjz7fYundWMC4VMc5a9dIv$ZYpdiwP7uE36cTDNWLJJrkZiCfP1bRhYYro9AhtxSHU=",
+  "created_at": {
+    "$date": "2025-05-26T16:30:16.390Z"
+  }
+}]

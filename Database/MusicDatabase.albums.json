@@ -1,0 +1,13 @@
+[{
+  "_id": {
+    "$oid": "68349e706733e40adcadc99b"
+  },
+  "artist_id": {
+    "$oid": "68349e1f6733e40adcadc99a"
+  },
+  "album_name": "SMITHEREENS",
+  "release_time": {
+    "$date": "2021-12-31T00:00:00.000Z"
+  },
+  "image": "albums/covers/68349e706733e40adcadc99b.jfif"
+}]

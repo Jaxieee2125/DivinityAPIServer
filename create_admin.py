@@ -22,8 +22,8 @@ def create_mongo_admin():
 
     # --- Lấy thông tin kết nối MongoDB từ settings.py (nếu có) ---
     try:
-        mongo_url = getattr(settings, 'MONGO_DB_URL', 'mongodb://localhost:27017/')
-        db_name = getattr(settings, 'MONGO_DB_NAME', 'MusicDatabase') # <<< THAY 'MusicServer' bằng tên DB của bạn
+        mongo_url = getattr(settings, 'MONGO_DB_URL', 'mongodb://localhost:27017/') # <<< THAY 'mongodb://localhost:27017/' bằng đường dẫn đến server của bạn
+        db_name = getattr(settings, 'MONGO_DB_NAME', 'MusicDatabase') # <<< THAY 'MusicDatabase' bằng tên DB của bạn
         client = MongoClient(mongo_url)
         db = client[db_name]
         # Kiểm tra kết nối

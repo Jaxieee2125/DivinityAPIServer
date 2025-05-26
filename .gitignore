@@ -19,10 +19,10 @@ db.sqlite3-journal
 
 # Media files (if you have user uploads)
 media/
-Storage/
 
 # Static files (collected static files)
 static/
+database.txt
 
 
 # Secret Key and other sensitive information

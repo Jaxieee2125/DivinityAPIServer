@@ -1,0 +1,20 @@
+[{
+  "_id": {
+    "$oid": "68349e1f6733e40adcadc99a"
+  },
+  "artist_name": "Joji",
+  "date_of_birth": {
+    "$date": "1993-09-11T00:00:00.000Z"
+  },
+  "national": "JP",
+  "social_media": "https://musicbrainz.org/artist/8264722b-df00-467a-858e-5c97cda169c9",
+  "number_of_songs": 0,
+  "number_of_plays": 0,
+  "number_of_likes": 0,
+  "musicgenre_ids": [
+    {
+      "$oid": "6834979c6733e40adcadc999"
+    }
+  ],
+  "artist_avatar": "artists/avatars/68349e1f6733e40adcadc99a.jpg"
+}]
