@@ -66,7 +66,17 @@
 4.  **Cấu hình MongoDB:**
     *   Đảm bảo MongoDB server đang chạy.
     *   Tạo database với tên bạn đã đặt trong `db = client['MusicDatabase']` ở MusicAPI/views.py.
-    *   Script này **không** sử dụng Django migrations để tạo bảng. Bạn cần tạo các collection thủ công nếu API yêu cầu (thường Pymongo sẽ tự tạo khi insert lần đầu).
+    *   Có thể import database mẫu bằng script import_database.py trong thư mục gốc
+         ```bash
+         python import_database.py
+         ```
+         Tài khoản Admin :
+            - Username: admin
+         	- Password: 123456789
+         Tài khoản User :
+         	- Username: user
+         	- Password: abc@1234
+
 
 5.  **Tạo Tài khoản Admin (Nếu chưa có):**
     *   Chạy script Python tùy chỉnh (ví dụ: `create_admin.py` bạn đã tạo) để thêm một bản ghi admin vào collection `users` và `admin` trong MongoDB với mật khẩu đã được hash.
