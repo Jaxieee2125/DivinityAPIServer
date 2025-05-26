@@ -1,5 +1,6 @@
 # music_api/token_user.py
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+from django.db import models
 
 class MongoTokenUser(AbstractBaseUser, PermissionsMixin):
     """
@@ -21,6 +22,29 @@ class MongoTokenUser(AbstractBaseUser, PermissionsMixin):
     # Chúng ta không dùng Django User model chuẩn nên không cần các trường này
     # USERNAME_FIELD = 'username' # Không cần thiết nếu không dùng cho login Django chuẩn
     # REQUIRED_FIELDS = [] # Không cần thiết
+    
+    # --- THÊM CÁC TRƯỜNG NÀY VỚI related_name='+ ---
+    groups = models.ManyToManyField(
+        'auth.Group', # Django Group model
+        verbose_name='groups',
+        blank=True,
+        help_text=(
+            'The groups this user belongs to. A user will get all permissions '
+            'granted to each of their groups.'
+        ),
+        related_name="mongo_token_user_set", # <<< Tên duy nhất
+        related_query_name="mongo_token_user",
+    )
+    user_permissions = models.ManyToManyField(
+        'auth.Permission', # Django Permission model
+        verbose_name='user permissions',
+        blank=True,
+        help_text='Specific permissions for this user.',
+        related_name="mongo_token_user_permissions_set", # <<< Tên duy nhất
+        related_query_name="mongo_token_user_permission",
+    )
+    # --------------------------------------------------
+
 
     # Override các phương thức không cần thiết (vì không tương tác DB trực tiếp)
     def __str__(self):
