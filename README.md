@@ -70,12 +70,13 @@
          ```bash
          python import_database.py
          ```
-         Tài khoản Admin :
-            - Username: admin
-         	- Password: 123456789
-         Tài khoản User :
-         	- Username: user
-         	- Password: abc@1234
+         
+      * Tài khoản Admin :
+         - Username: admin
+         - Password: 123456789
+      * Tài khoản User :
+         - Username: user
+         - Password: abc@1234
 
 
 5.  **Tạo Tài khoản Admin (Nếu chưa có):**
