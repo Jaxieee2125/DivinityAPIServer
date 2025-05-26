@@ -1,0 +1,25 @@
+[{
+  "_id": {
+    "$oid": "68349ec26733e40adcadc99c"
+  },
+  "artist_ids": [
+    {
+      "$oid": "68349e1f6733e40adcadc99a"
+    }
+  ],
+  "album_id": {
+    "$oid": "68349e706733e40adcadc99b"
+  },
+  "song_name": "Glimpse of Us",
+  "release_time": {
+    "$date": "2021-03-12T00:00:00.000Z"
+  },
+  "duration_song": 233,
+  "musicgenre_ids": [
+    {
+      "$oid": "6834979c6733e40adcadc999"
+    }
+  ],
+  "status": "published",
+  "file_up": "audio/68349ec26733e40adcadc99c.flac"
+}]
